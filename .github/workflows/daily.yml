@@ -67,8 +67,9 @@ jobs:
           if grep -rl 'FAQPage' site --include=*.html | grep -q .; then
             echo "ERROR: FAQPage schema found (deprecated)"; exit 1
           fi
-          if grep -rl '游戏\|总榜' site --include=*.html | grep -q .; then
-            echo "ERROR: Chinese category leaked into English pages"; exit 1
+          # 中文品类名只允许出现在中文语言目录 /zh/ 下；其他语言（含英文/韩/日/土）必须本地化
+          if find site -name index.html -not -path '*/zh/*' -print0 | xargs -0 grep -l '游戏\|总榜' 2>/dev/null | grep -q .; then
+            echo "ERROR: Chinese category leaked into non-Chinese pages"; exit 1
           fi
           if grep -rl 'example.com' site --include=*.html | grep -q .; then
             echo "ERROR: placeholder domain found"; exit 1

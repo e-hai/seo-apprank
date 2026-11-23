@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 import config as C
 import incremental as INC
+import locales as L
 
 # ---------------------------------------------------------------------------
 # 数据层
@@ -103,42 +104,29 @@ def compute_insights(rows: list[dict], trend: dict, date: str, market: str, char
     mkt = C.market_name(market, lang)
     ch = C.CHARTS[chart][lang]
     n = len(rows)
+    I = L.get(lang)["insight"]
     # 当 new 占比过高（如数据源首次抓取该榜），"N new entries" 会失真且无意义，
     # 改用稳健描述：只陈述榜单构成事实，不夸大"异动"。
     new_ratio = len(new_apps) / n if n else 0
     new_phrase = (
-        (f"{len(new_apps)} of the listed apps are newly tracked" if lang == "en"
-         else f"榜上 {len(new_apps)} 款为新增追踪")
-        if new_ratio <= 0.5
-        else ("several entries are being observed for the first time, so day-over-day "
-              "movement is limited" if lang == "en" else "本次为该榜单的首次采样，日环比变动有限")
+        I["new_low"].format(n=len(new_apps)) if new_ratio <= 0.5 else I["new_high"]
     )
     mover_phrase = (
-        f"The biggest climber was {risers[0]['name']} (+{risers[0]['rank_change']} spots). "
-        if risers else ("No apps gained positions in this snapshot. " if lang == "en"
-                        else "本次采样中无应用名次上升。")
+        I["mover"].format(name=risers[0]["name"], n=risers[0]["rank_change"])
+        if risers else I["mover_none"]
     )
     # 品类若全是"总榜"，不写"X 类别占比最高"这种无信息量的话
-    # 数据源品类名为中文，英文页需翻译后展示
     top_genre_disp = C.genre_label(top_genre, lang)
     genre_phrase = (
-        (f"{top_genre_disp} is the most represented category ({top_genre_n}/{n}). " if lang == "en"
-         else f"{top_genre_disp} 类别占比最高（{top_genre_n}/{n}）。")
+        I["genre"].format(genre=top_genre_disp, n=top_genre_n, total=n)
         if top_genre and top_genre_n < n else ""
     )
-    if lang == "zh":
-        insight = (
-            f"截至 {date}，{mkt} {ch} Top {n} 中{new_phrase}；{mover_phrase}"
-            f"{top_dev or '—'} 以 {top_dev_n} 款入榜成为上榜产品最多的开发者。"
-            f"{genre_phrase}榜首为 {top.get('name', '—')}，评分 {top.get('rating', '—')}。"
-        )
-    else:
-        insight = (
-            f"As of {date}, {new_phrase} in the {mkt} {ch} Top {n}. {mover_phrase}"
-            f"{top_dev or '—'} leads developers with {top_dev_n} apps on the board. "
-            f"{genre_phrase}The current #1 is {top.get('name', '—')} with a "
-            f"{top.get('rating', '—')} rating."
-        )
+    dev_phrase = I["dev"].format(dev=top_dev or "—", n=top_dev_n)
+    top_phrase = I["top"].format(name=top.get("name", "—"), rating=top.get("rating", "—"))
+    insight = I["frame"].format(
+        date=date, new=new_phrase, mkt=mkt, ch=ch, n=n,
+        mover=mover_phrase, dev=dev_phrase, genre=genre_phrase, top=top_phrase,
+    )
     return {
         "insight": insight,
         "new_count": len(new_apps),
@@ -242,23 +230,57 @@ def software_schema(rows: list[dict]) -> list[dict]:
     return out
 
 # ---------------------------------------------------------------------------
+# 多语言 URL / 语言切换器
+# ---------------------------------------------------------------------------
+def lang_prefix(lang: str) -> str:
+    return "" if lang == "en" else f"/{lang}"
+
+
+def page_rel_dir(lang: str, store: str, market: str, chart: str, genre: str | None) -> str:
+    parts = [store, market, "top", chart] + ([genre] if genre else [])
+    return f"{lang_prefix(lang)}/{'/'.join(parts)}"
+
+
+def page_url(lang: str, store: str, market: str, chart: str, genre: str | None) -> str:
+    return f"{C.SITE['base_url']}{page_rel_dir(lang, store, market, chart, genre)}/"
+
+
+def home_url(lang: str) -> str:
+    p = lang_prefix(lang)
+    return f"{C.SITE['base_url']}{p}/"
+
+
+def language_nav(current: str, store: str, market: str, chart: str,
+                 genre: str | None, lang_pages: dict[str, set[str]]) -> str:
+    """生成语言切换器：链接到同一内容的各语言版本；该语言无此市场页则回落到首页。"""
+    links = []
+    for code in ["en"] + L.NON_EN_LANGS:
+        meta = L.get(code)
+        equivalent = page_url(code, store, market, chart, genre)
+        if equivalent in lang_pages.get(code, set()):
+            href = equivalent
+        else:
+            href = home_url(code)  # 该语言没有此市场页面，避免死链
+        cur = ' class="current" aria-current="page"' if code == current else ""
+        label = meta["native"] if code != "en" else "English"
+        links.append(f'<a href="{html.escape(href)}"{cur} lang="{meta["html_lang"]}">{html.escape(label)}</a>')
+    return "\n".join(links)
+
+
+# ---------------------------------------------------------------------------
 # hreflang 生成 + 校验
 # ---------------------------------------------------------------------------
-def hreflang_tags(sibling_urls: dict[str, str]) -> tuple[str, dict[str, str]]:
+def hreflang_tags(mapping: dict[str, str]) -> tuple[str, dict[str, str]]:
     """生成自引用 + 双向互指 + x-default 的 hreflang 标签组。
-    sibling_urls: {market_code: full_url} —— 同一内容组（同 chart/品类）在各市场的 URL。
+    mapping: {hreflang_code: full_url} —— 同一内容组（同 chart/品类）在各语言/市场的 URL。
     只有实际生成的页面才进入互指集合，避免指向不存在页面。
     返回 (HTML 标签串, {lang_code: url} 映射) 供校验使用。"""
-    mapping: dict[str, str] = {}
-    for m, url in sibling_urls.items():
-        mapping[C.hreflang_code(m, "en")] = url
-    if "us" in sibling_urls:
-        mapping["x-default"] = sibling_urls["us"]
+    out = dict(mapping)
     tags = "\n".join(
         f'    <link rel="alternate" hreflang="{html.escape(code)}" href="{html.escape(url)}"/>'
-        for code, url in mapping.items()
+        for code, url in out.items()
     )
-    return tags, mapping
+    return tags, out
 
 def validate_hreflang(groups: dict[str, dict[str, str]]) -> list[str]:
     """校验双向互指与自引用。
@@ -321,6 +343,10 @@ h1,h2,h3{color:var(--ink);letter-spacing:-.02em}
 .crumb{font-size:.84rem;color:#94a3b8}
 .crumb a{color:#cbd5e1}
 .crumb .sep{margin:0 8px;color:#475569}
+.langnav{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.langnav a{font-size:.76rem;color:#94a3b8;padding:4px 9px;border:1px solid #334155;border-radius:7px;white-space:nowrap}
+.langnav a:hover,.langnav a.current{color:#fff;border-color:var(--accent);background:var(--accent);text-decoration:none}
+.langflag{display:inline-flex;align-items:center;gap:5px}
 
 /* Hero */
 .hero{padding:34px 0 26px}
@@ -468,9 +494,11 @@ footer p{margin:5px 0}
 }
 """
 
-# JS 逻辑独立成串，用 __ROWS_JSON__ 占位；注入后大括号不会被再次 format 解析。
+# JS 逻辑独立成串，用 __ROWS_JSON__ 等占位；注入后大括号不会被再次 format 解析。
 APP_JS = r"""
 const ROWS=__ROWS_JSON__;
+const STR={empty:__S_EMPTY__,count:__S_COUNT__,new:__S_NEW__,
+           segAll:__S_SEGALL__,segUp:__S_SEGUP__,segDown:__S_SEGDOWN__,segNew:__S_SEGNEW__};
 let sortKey='rank',sortDir=1,activeFilter='all';
 function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
 function initial(s){return esc((s||'?').trim().charAt(0).toUpperCase());}
@@ -479,7 +507,7 @@ function rankHtml(n){
   return '<span class="rk '+cls+'">'+n+'</span>';
 }
 function moveHtml(r){
-  if(r.status==='new')return '<span class="move new">NEW</span>';
+  if(r.status==='new')return '<span class="move new">'+esc(STR.new)+'</span>';
   const c=r.rank_change||0;
   if(c>0)return '<span class="move up">\u25B2 +'+c+'</span>';
   if(c<0)return '<span class="move down">\u25BC '+c+'</span>';
@@ -529,14 +557,14 @@ function render(){
     '<td><span class="genre-pill">'+esc(r.genre_name||'\u2014')+'</span></td>'+
     '<td>'+ratingHtml(r)+'</td>'+
     '<td>'+moveHtml(r)+'</td></tr>'
-  ).join('')||'<tr class="empty-row"><td colspan="6">No apps match your filters.</td></tr>';
-  document.getElementById('count').innerHTML='Showing <b>'+rs.length+'</b> of '+ROWS.length+' apps';
+  ).join('')||'<tr class="empty-row"><td colspan="6">'+esc(STR.empty)+'</td></tr>';
+  document.getElementById('count').innerHTML=STR.count.replace('{a}',rs.length).replace('{b}',ROWS.length);
 }
 render();
 """
 
 TPL = """<!doctype html>
-<html lang="{lang}">
+<html lang="{html_lang}">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -550,110 +578,101 @@ TPL = """<!doctype html>
 </head>
 <body>
 <header class="topbar"><div class="wrap">
-  <a class="brand" href="/"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
-  <nav class="crumb"><a href="/">Home</a><span class="sep">/</span>{breadcrumb}</nav>
+  <a class="brand" href="{home_url}"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
+  <nav class="langnav" aria-label="{lang_label}">{lang_nav}</nav>
 </div></header>
 
 <main class="wrap">
   <section class="hero">
-    <span class="hero-eyebrow">Daily chart \u00b7 {mkt} \u00b7 {ch}</span>
+    <span class="hero-eyebrow">{hero_eyebrow} \u00b7 {mkt} \u00b7 {ch}</span>
     <h1>{h1}</h1>
-    <p class="hero-sub">A point-in-time snapshot of the top apps, with daily rank movement,
-      historical position and insights computed from the real data.</p>
+    <p class="hero-sub">{hero_sub}</p>
     <div class="meta-row">
-      <span class="meta-pill"><span class="dot"></span>Last updated <b>{updated}</b></span>
-      <span class="meta-pill"><span class="dot"></span>Source <b>{source_note}</b></span>
+      <span class="meta-pill"><span class="dot"></span>{meta_updated} <b>{updated}</b></span>
+      <span class="meta-pill"><span class="dot"></span>{meta_source} <b>{source_note}</b></span>
       {streak_note}
     </div>
   </section>
 
   <section class="insight-card">
     <div class="insight-icon">\u2726</div>
-    <div><div class="insight-label">What changed today</div><p>{insight}</p></div>
+    <div><div class="insight-label">{insight_label}</div><p>{insight}</p></div>
   </section>
 
   <div class="stat-grid">{stats}</div>
 
   <section class="panel">
     <div class="panel-head">
-      <div><h2>Top apps right now</h2><p class="panel-sub">Search, filter by movement, or click any column to sort.</p></div>
+      <div><h2>{tbl_title}</h2><p class="panel-sub">{tbl_sub}</p></div>
       <span class="result-count" id="count"></span>
     </div>
     <div class="toolbar">
       <label class="search"><span class="ico">\u26b2</span>
-        <input id="q" type="search" placeholder="Filter by app or developer\u2026" oninput="render()"/></label>
+        <input id="q" type="search" placeholder="{search_ph}" oninput="render()"/></label>
       <div class="segments">
-        <button class="seg active" data-f="all" onclick="setFilter('all',this)">All</button>
-        <button class="seg" data-f="up" onclick="setFilter('up',this)">Climbers</button>
-        <button class="seg" data-f="down" onclick="setFilter('down',this)">Falling</button>
-        <button class="seg" data-f="new" onclick="setFilter('new',this)">New</button>
+        <button class="seg active" data-f="all" onclick="setFilter('all',this)">{seg_all}</button>
+        <button class="seg" data-f="up" onclick="setFilter('up',this)">{seg_up}</button>
+        <button class="seg" data-f="down" onclick="setFilter('down',this)">{seg_down}</button>
+        <button class="seg" data-f="new" onclick="setFilter('new',this)">{seg_new}</button>
       </div>
     </div>
     <div class="table-scroll">
       <table class="rank"><thead><tr>
-        <th data-k="rank" onclick="sortBy('rank')">#<span class="arrow"></span></th>
-        <th data-k="name" onclick="sortBy('name')">App<span class="arrow"></span></th>
-        <th data-k="developer" onclick="sortBy('developer')">Developer<span class="arrow"></span></th>
-        <th data-k="category" onclick="sortBy('category')">Category<span class="arrow"></span></th>
-        <th data-k="rating" onclick="sortBy('rating')">Rating<span class="arrow"></span></th>
-        <th data-k="change" onclick="sortBy('change')">Move<span class="arrow"></span></th>
+        <th data-k="rank" onclick="sortBy('rank')">{th_rank}<span class="arrow"></span></th>
+        <th data-k="name" onclick="sortBy('name')">{th_app}<span class="arrow"></span></th>
+        <th data-k="developer" onclick="sortBy('developer')">{th_dev}<span class="arrow"></span></th>
+        <th data-k="category" onclick="sortBy('category')">{th_cat}<span class="arrow"></span></th>
+        <th data-k="rating" onclick="sortBy('rating')">{th_rating}<span class="arrow"></span></th>
+        <th data-k="change" onclick="sortBy('change')">{th_move}<span class="arrow"></span></th>
       </tr></thead><tbody id="tb"></tbody></table>
     </div>
   </section>
 
   <section class="panel">
-    <h2>Rank history <span class="muted-sm">top 5 \u00b7 best position by day</span></h2>
+    <h2>{rank_title} <span class="muted-sm">{rank_sub}</span></h2>
     <div class="spark-grid">{spark}</div>
   </section>
 
   <div class="two-col">
-    <section class="panel prose"><h2>Methodology</h2><p>{methodology}</p></section>
-    <section class="panel"><h2>Good to know</h2>{faq}</section>
+    <section class="panel prose"><h2>{method_title}</h2><p>{methodology}</p></section>
+    <section class="panel"><h2>{faq_title}</h2>{faq}</section>
   </div>
 </main>
 
 <footer><div class="wrap">
   <div class="footer-brand">AppRank<span class="brand-dot">.</span>Index</div>
   <p>{attribution}</p>
-  <p>Last updated {updated}. Rankings are a point-in-time sample and may differ from real-time store placement.</p>
+  <p>{footer_note}</p>
 </div></footer>
 <script>{app_js}</script>
 </body>
 </html>
 """
 
-def render_page(store, market, chart, date, genre, rows, trend, insights, sibling_urls, out_root):
-    lang = C.SITE["lang"]
+def render_page(lang, store, market, chart, date, genre, rows, trend, insights,
+                hreflang_mapping, lang_pages, out_root):
+    T = L.get(lang)
     mkt = C.market_name(market, lang)
     ch = C.CHARTS[chart][lang]
-    gn = C.genre_label("游戏", lang) if genre else None  # 品类页当前仅"游戏"，显示可读标签
-    h1 = f"{ch} Apps in {mkt} — {date}" + (f" ({gn})" if gn else "")
-    title = f"{ch} Apps in {mkt} ({date}) | {C.SITE['name']}"
+    gn = C.genre_label("游戏", lang) if genre else None  # 品类页当前仅"游戏"
+    h1 = T["h1_chart"].format(ch=ch, mkt=mkt, date=date) + (f" ({gn})" if gn else "")
+    title = T["title_chart"].format(ch=ch, mkt=mkt, date=date, site=C.SITE["name"])
     description = make_description(insights["insight"])
 
-    # URL 结构：/{store}/{market}/top/{chart}/（区分双平台，避免撞车；品类页加 /{genre}/）
-    parts = [store, market, "top", chart] + ([genre] if genre else [])
-    rel_dir = "/".join(parts)
-    url = f"{C.SITE['base_url']}/{rel_dir}/"
+    rel_dir = page_rel_dir(lang, store, market, chart, genre)
+    url = page_url(lang, store, market, chart, genre)
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    source_note = "App Store official charts"
-    if store == "play":
-        source_note = "Google Play official charts"
-    methodology = (
-        f"This page ranks the top apps on the {ch} chart in {mkt} for {date}. "
-        f"Data is pulled from a daily snapshot of official storefront charts, sampled once per day. "
-        f"Rank movement compares against the previous available day. "
-        f"Ratings and developer names are shown as provided by the source. "
-        f"This is a point-in-time sample, not a real-time feed."
-    )
+    source_note = "App Store" if store == "app_store" else "Google Play"
+    methodology = T["methodology"].format(ch=ch, mkt=mkt, date=date)
     streak_note = (
-        f'<span class="meta-pill"><span class="dot"></span>Longest streak <b>'
-        f'{insights["longest_streak"]} days</b></span>'
+        f'<span class="meta-pill"><span class="dot"></span>'
+        f'{html.escape(T["meta_longest_streak"])} <b>{insights["longest_streak"]} '
+        f'{html.escape(T["days"])}</b></span>'
         if insights['longest_streak'] else ""
     )
 
-    # 统计卡片：由当日真实数据计算
+    # 统计卡片：由当日真实数据计算，文案随语言变化
     top = rows[0] if rows else {}
     risers = insights.get("risers") or []
     biggest = risers[0] if risers else None
@@ -663,13 +682,12 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
                 f'<div class="stat-v{vc}" title="{html.escape(str(v))}">{html.escape(str(v))}</div>'
                 + (f'<div class="stat-s">{html.escape(str(s))}</div>' if s else "") + '</div>')
     stats = "".join([
-        stat("#1 right now", top.get("name", "\u2014"),
-             f'{ch} in {mkt}', accent=True),
-        stat("New this snapshot", str(insights["new_count"]), "apps entering the board"),
-        stat("Biggest climber", biggest["name"] if biggest else "\u2014",
-             (f'+{biggest["rank_change"]} spots' if biggest else "no movement")),
-        stat("Top developer", insights["top_dev"] or "\u2014",
-             f'{insights["top_dev_n"]} apps on the board'),
+        stat(T["stat_1"], top.get("name", "—"), f'{ch} · {mkt}', accent=True),
+        stat(T["stat_2"], str(insights["new_count"]), T["stat_2_sub"]),
+        stat(T["stat_3"], biggest["name"] if biggest else "—",
+             (f'+{biggest["rank_change"]} {T["stat_spots"]}' if biggest else T["stat_3_none"])),
+        stat(T["stat_4"], insights["top_dev"] or "—",
+             f'{insights["top_dev_n"]} {T["stat_apps_board"]}'),
     ])
 
     # 趋势 SVG：取前 5 名中在趋势里有数据的
@@ -681,31 +699,30 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
             recent = s[-30:]
             spark_parts.append(
                 f'<div class="spark-card"><h3>{html.escape(r["name"])}</h3>'
-                f'<p class="spark-meta">Best rank over {len(recent)} observed days</p>'
-                f'{trend_svg(recent, uid=f"c{i}")}</div>'
+                f'<p class="spark-meta">{html.escape(T["best_over"].format(n=len(recent)))}</p>'
+                f'{trend_svg(recent, uid=f"{lang}-c{i}")}</div>'
             )
     spark = ("\n".join(spark_parts) or
-             "<p class='muted-sm'>Trend data not yet available for this market.</p>")
+             f'<p class="muted-sm">{html.escape(T["empty"])}</p>')
 
-    faq = (
-        "<details><summary>How often is this data updated?</summary>"
-        "<p>The source dataset publishes a new snapshot daily. This page shows the latest available date shown above.</p></details>"
-        "<details><summary>Is this the official App Store ranking?</summary>"
-        "<p>Rankings are sourced from official storefront charts via a third-party open dataset and represent a daily sample, not the live store. For real-time placement, check the official store.</p></details>"
-        "<details><summary>Do you own this data?</summary>"
-        "<p>No. App names, icons and ratings belong to their respective owners. This page presents factual ranking data with attribution and links to the official stores.</p></details>"
+    faq = "".join(
+        f'<details><summary>{html.escape(q)}</summary><p>{html.escape(a)}</p></details>'
+        for q, a in T["faq"]
     )
 
     attribution = (
-        "Data source: <a href='https://github.com/e-hai/Appstore_Top_30' rel='nofollow'>e-hai/Appstore_Top_30</a> "
-        "(daily snapshots of Apple App Store / Google Play official charts). "
-        "App Store is a trademark of Apple Inc. Google Play is a trademark of Google LLC. "
-        "All app names and marks belong to their respective owners."
+        f'{html.escape(T["footer_source_prefix"])} '
+        '<a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a> '
+        f'— {html.escape(T["footer_tm"])}'
     )
+    footer_note = html.escape(T["footer_note"].format(updated=updated))
 
-    hl, hl_map = hreflang_tags(sibling_urls)
+    hl, hl_map = hreflang_tags(hreflang_mapping)
     jsonld = json.dumps([dataset_schema(rows, date, market, chart, lang)] + software_schema(rows),
                         ensure_ascii=False)
+
+    # 语言切换器：当前页在各语言是否有对应页
+    nav = language_nav(lang, store, market, chart, genre, lang_pages)
 
     # 给 JS 的精简行数据
     js_rows = [{
@@ -716,16 +733,41 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
         "status": r.get("status", ""),
     } for r in rows]
 
-    app_js = APP_JS.replace("__ROWS_JSON__", json.dumps(js_rows, ensure_ascii=False))
+    app_js = (APP_JS
+              .replace("__ROWS_JSON__", json.dumps(js_rows, ensure_ascii=False))
+              .replace("__S_EMPTY__", json.dumps(T["empty"], ensure_ascii=False))
+              .replace("__S_COUNT__", json.dumps(T["count_fmt"], ensure_ascii=False))
+              .replace("__S_NEW__", json.dumps(T["seg_new"], ensure_ascii=False))
+              .replace("__S_SEGALL__", json.dumps(T["seg_all"], ensure_ascii=False))
+              .replace("__S_SEGUP__", json.dumps(T["seg_up"], ensure_ascii=False))
+              .replace("__S_SEGDOWN__", json.dumps(T["seg_down"], ensure_ascii=False))
+              .replace("__S_SEGNEW__", json.dumps(T["seg_new"], ensure_ascii=False)))
+
     page = TPL.format(
-        lang=lang, title=html.escape(title), description=html.escape(description),
+        html_lang=T["html_lang"], title=html.escape(title), description=html.escape(description),
         canonical=url, hreflang=hl, jsonld=jsonld, style=STYLE, app_js=app_js,
-        breadcrumb=f"{mkt} / {ch}", h1=html.escape(h1), mkt=html.escape(mkt), ch=html.escape(ch),
-        updated=updated, source_note=source_note, streak_note=streak_note,
-        insight=html.escape(insights["insight"]), methodology=html.escape(methodology),
-        stats=stats, spark=spark, faq=faq, attribution=attribution,
+        home_url=home_url(lang), lang_label=html.escape(T["lang_label"]), lang_nav=nav,
+        hero_eyebrow=html.escape(T["hero_eyebrow_chart"]),
+        hero_sub=html.escape(T["hero_sub_chart"]),
+        meta_updated=html.escape(T["meta_last_updated"]),
+        meta_source=html.escape(T["meta_source"]),
+        h1=html.escape(h1), mkt=html.escape(mkt), ch=html.escape(ch),
+        updated=updated, source_note=html.escape(source_note), streak_note=streak_note,
+        insight_label=html.escape(T["insight_label"]),
+        insight=html.escape(insights["insight"]), tbl_title=html.escape(T["tbl_title"]),
+        tbl_sub=html.escape(T["tbl_sub"]), search_ph=html.escape(T["search_ph"]),
+        seg_all=html.escape(T["seg_all"]), seg_up=html.escape(T["seg_up"]),
+        seg_down=html.escape(T["seg_down"]), seg_new=html.escape(T["seg_new"]),
+        th_rank=html.escape(T["th_rank"]), th_app=html.escape(T["th_app"]),
+        th_dev=html.escape(T["th_developer"]), th_cat=html.escape(T["th_category"]),
+        th_rating=html.escape(T["th_rating"]), th_move=html.escape(T["th_move"]),
+        rank_title=html.escape(T["rank_title"]), rank_sub=html.escape(T["rank_sub"]),
+        method_title=html.escape(T["method_title"]), methodology=html.escape(methodology),
+        faq_title=html.escape(T["faq_title"]), faq=faq,
+        attribution=attribution, footer_note=footer_note,
+        stats=stats, spark=spark,
     )
-    dest = Path(out_root) / rel_dir / "index.html"
+    dest = Path(out_root) / rel_dir.lstrip("/") / "index.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(page, encoding="utf-8")
     return str(dest), url, hl_map
@@ -733,22 +775,23 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
 # ---------------------------------------------------------------------------
 # Sitemap
 # ---------------------------------------------------------------------------
-def write_homepage(urls: list[tuple[str, str]], out_root: str, date: str):
-    """生成根首页 /index.html：作为全站导航枢纽，链接到所有已生成的榜单页。
-    只输出实际存在的页面链接（urls 来自本轮 fetch 结果），避免死链。"""
+def write_homepage(lang, urls: list[tuple[str, str]], out_root: str, date: str):
+    """生成该语言的导航枢纽首页。英文在 /，其他语言在 /{lang}/。
+    只输出本语言实际存在的页面链接（urls 来自本轮 fetch 结果），避免死链。"""
+    T = L.get(lang)
     base = C.SITE["base_url"].rstrip("/")
     existing = {u.rstrip("/") for u, _ in urls}
+    markets = L.LANG_MARKETS.get(lang, C.ALL_MARKETS) if lang != "en" else C.ALL_MARKETS
 
     def cell(store, m, ch, g=None):
-        parts = [store, m, "top", ch] + ([g] if g else [])
-        url = f"{base}/{'/'.join(parts)}/"
+        url = page_url(lang, store, m, ch, g)
         if url.rstrip("/") not in existing:
-            return '<span class="dash">\u2014</span>'
-        label = C.CHARTS[ch]["en"] + (f" \u00b7 {C.genre_label('游戏', 'en')}" if g else "")
+            return '<span class="dash">—</span>'
+        label = C.CHARTS[ch][lang] + (f" · {C.genre_label('游戏', lang)}" if g else "")
         return f'<a class="chart-link" href="{html.escape(url)}">{html.escape(label)}</a>'
 
     n = len(existing)
-    desc = (f"Daily Top 30 app charts for {len(C.ALL_MARKETS)} markets across the App Store and "
+    desc = (f"Daily Top 30 app charts for {len(markets)} markets across the App Store and "
             f"Google Play: free, paid, grossing and games, with rank history and insights. "
             f"Snapshot {date}.")
 
@@ -756,46 +799,63 @@ def write_homepage(urls: list[tuple[str, str]], out_root: str, date: str):
     for s in C.ALL_STORES:
         platform_table_rows = []
         genre = C.GENRE_BY_STORE.get(s)
-        head = ("<tr><th>Market</th><th>Top Free</th><th>Top Paid</th><th>Top Grossing</th>"
-                "<th>Games \u00b7 Free</th><th>Games \u00b7 Paid</th><th>Games \u00b7 Grossing</th></tr>")
-        for m in C.ALL_MARKETS:
-            cells = [f'<td class="mkt">{html.escape(C.market_name(m, "en"))}</td>']
+        head = (f"<tr><th>{html.escape(T['mx_market'])}</th><th>{html.escape(T['mx_free'])}</th>"
+                f"<th>{html.escape(T['mx_paid'])}</th><th>{html.escape(T['mx_grossing'])}</th>"
+                f"<th>{html.escape(T['mx_gfree'])}</th><th>{html.escape(T['mx_gpaid'])}</th>"
+                f"<th>{html.escape(T['mx_ggrossing'])}</th></tr>")
+        for m in markets:
+            cells = [f'<td class="mkt">{html.escape(C.market_name(m, lang))}</td>']
             cells += [f"<td>{cell(s, m, ch)}</td>" for ch in C.ALL_CHARTS]
             cells += [f"<td>{cell(s, m, ch, genre) if genre else '—'}</td>" for ch in C.ALL_CHARTS]
             platform_table_rows.append("<tr>" + "".join(cells) + "</tr>")
         store_panels.append(
             f'<section class="panel"><div class="panel-head"><div>'
             f'<h2>{html.escape(C.STORES[s]["en"])}</h2>'
-            f'<p class="panel-sub">Browse live chart pages by market and ranking type.</p>'
+            f'<p class="panel-sub">{html.escape(T["browse_sub"])}</p>'
             f'</div></div><div class="table-scroll"><table class="matrix">{head}'
             f'{"".join(platform_table_rows)}</table></div></section>')
 
     stat_grid = "".join([
-        f'<div class="stat"><div class="stat-k">Markets</div>'
-        f'<div class="stat-v accent">{len(C.ALL_MARKETS)}</div>'
-        f'<div class="stat-s">storefronts worldwide</div></div>',
-        f'<div class="stat"><div class="stat-k">Chart pages</div>'
-        f'<div class="stat-v">{n}</div><div class="stat-s">indexed &amp; updated daily</div></div>',
-        f'<div class="stat"><div class="stat-k">Platforms</div>'
-        f'<div class="stat-v">2</div><div class="stat-s">App Store &amp; Google Play</div></div>',
-        f'<div class="stat"><div class="stat-k">Last snapshot</div>'
+        f'<div class="stat"><div class="stat-k">{html.escape(T["stat_markets"])}</div>'
+        f'<div class="stat-v accent">{len(markets)}</div>'
+        f'<div class="stat-s">{html.escape(T["stat_markets_sub"])}</div></div>',
+        f'<div class="stat"><div class="stat-k">{html.escape(T["stat_pages"])}</div>'
+        f'<div class="stat-v">{n}</div><div class="stat-s">{T["stat_pages_sub"]}</div></div>',
+        f'<div class="stat"><div class="stat-k">{html.escape(T["stat_platforms"])}</div>'
+        f'<div class="stat-v">2</div><div class="stat-s">{T["stat_platforms_sub"]}</div></div>',
+        f'<div class="stat"><div class="stat-k">{html.escape(T["stat_snapshot"])}</div>'
         f'<div class="stat-v" style="font-size:1.05rem">{html.escape(date)}</div>'
-        f'<div class="stat-s">fresh data every day</div></div>',
+        f'<div class="stat-s">{html.escape(T["stat_snapshot_sub"])}</div></div>',
     ])
     store_panels_html = "\n".join(store_panels)
+    # 首页语言切换：各语言首页始终存在
+    nav_links = []
+    for code in ["en"] + L.NON_EN_LANGS:
+        meta = L.get(code)
+        cur = ' class="current" aria-current="page"' if code == lang else ""
+        label = "English" if code == "en" else meta["native"]
+        nav_links.append(f'<a href="{html.escape(home_url(code))}"{cur} '
+                         f'lang="{meta["html_lang"]}">{html.escape(label)}</a>')
+    nav = "\n".join(nav_links)
+
+    hreflang_home = "\n".join(
+        f'    <link rel="alternate" hreflang="{"x-default" if c == "en" else c}" '
+        f'href="{html.escape(home_url(c))}"/>'
+        for c in ["en"] + L.NON_EN_LANGS
+    )
     page = f"""<!doctype html>
-<html lang="en">
+<html lang="{T['html_lang']}">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{html.escape(C.SITE['name'])} \u2014 Daily App Store &amp; Google Play Top 30 Charts</title>
+<title>{html.escape(C.SITE['name'])} — {html.escape(T['home_title'])}</title>
 <meta name="description" content="{html.escape(desc)}"/>
 <meta name="robots" content="index,follow"/>
-<link rel="canonical" href="{html.escape(base)}/"/>
-<link rel="alternate" hreflang="x-default" href="{html.escape(base)}/"/>
+<link rel="canonical" href="{html.escape(home_url(lang))}"/>
+{hreflang_home}
 <script type="application/ld+json">{{
   "@context":"https://schema.org","@type":"Dataset",
-  "name":"{html.escape(C.SITE['name'])} \u2014 Daily App Charts",
+  "name":"{html.escape(C.SITE['name'])} — Daily App Charts",
   "description":"{html.escape(desc)}",
   "creator":{{"@type":"Organization","name":"{html.escape(C.SITE['name'])}"}},
   "temporalCoverage":"{date}","isAccessibleForFree":true,
@@ -805,20 +865,18 @@ def write_homepage(urls: list[tuple[str, str]], out_root: str, date: str):
 </head>
 <body>
 <header class="topbar"><div class="wrap">
-  <a class="brand" href="/"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
-  <nav class="crumb"><span class="meta-pill" style="border-color:#334155;background:#1e293b;color:#cbd5e1">\u00b7 Daily app chart directory</span></nav>
+  <a class="brand" href="{html.escape(home_url(lang))}"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
+  <nav class="langnav" aria-label="{html.escape(T['lang_label'])}">{nav}</nav>
 </div></header>
 
 <main class="wrap">
   <section class="hero">
-    <span class="hero-eyebrow">Free \u00b7 Paid \u00b7 Grossing \u00b7 Games</span>
-    <h1>App charts, tracked daily.</h1>
-    <p class="hero-sub">Daily snapshots of the top apps in {len(C.ALL_MARKETS)} markets on the App Store
-      and Google Play. Every page shows the current board, rank movement, a rank-history chart
-      and a short insight computed from that day's real data.</p>
+    <span class="hero-eyebrow">{html.escape(T['home_eyebrow'])}</span>
+    <h1>{html.escape(T['home_title'])}</h1>
+    <p class="hero-sub">{html.escape(T['home_sub'].format(n=len(markets)))}</p>
     <div class="meta-row">
-      <span class="meta-pill"><span class="dot"></span>Updated daily</span>
-      <span class="meta-pill"><span class="dot"></span>Source: <b>e-hai/Appstore_Top_30</b></span>
+      <span class="meta-pill"><span class="dot"></span>{html.escape(T['home_updated'])}</span>
+      <span class="meta-pill"><span class="dot"></span>{html.escape(T['home_source_label'])}<b>e-hai/Appstore_Top_30</b></span>
     </div>
   </section>
 
@@ -829,14 +887,15 @@ def write_homepage(urls: list[tuple[str, str]], out_root: str, date: str):
 
 <footer><div class="wrap">
   <div class="footer-brand">AppRank<span class="brand-dot">.</span>Index</div>
-  <p>Data source: <a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a>
-    \u2014 daily snapshots of Apple App Store / Google Play official charts, not a live feed.</p>
-  <p>App Store is a trademark of Apple Inc. Google Play is a trademark of Google LLC.
-    All app names and marks belong to their respective owners.</p>
+  <p>{html.escape(T['footer_source_prefix'])} <a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a> — {html.escape(T['footer_tm'])}</p>
 </div></footer>
 </body>
 </html>"""
-    Path(out_root, "index.html").write_text(page, encoding="utf-8")
+    prefix = lang_prefix(lang).lstrip("/")
+    dest = Path(out_root) / prefix / "index.html" if prefix else Path(out_root, "index.html")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(page, encoding="utf-8")
+    return str(dest)
 
 def write_sitemap(urls: list[tuple[str, str]], out_root: str):
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -856,7 +915,8 @@ def write_robots(out_root: str):
 # Main
 # ---------------------------------------------------------------------------
 def build_jobs(mode: str):
-    """返回 jobs: [(store, market, chart, genre)]"""
+    """返回需要抓取排名的数据作业: [(store, market, chart, genre)]，按数据组合去重。
+    语言维度不在这里展开——同一份排名数据会被多个语言渲染，避免重复网络请求。"""
     if mode == "sample":
         return [("app_store", m, C.PILOT_CHART, g)
                 for m in C.PILOT_MARKETS for g in C.PILOT_GENRES][:10]
@@ -871,6 +931,43 @@ def build_jobs(mode: str):
                         jobs.append((store, m, ch, g))         # 游戏榜
         return jobs
     raise ValueError(f"unknown mode: {mode}")
+
+
+def _langs_for_market(market: str) -> list[str]:
+    """该市场需要渲染哪些语言：英文全部 + 覆盖该市场的其他语言。"""
+    return ["en"] + [lg for lg, mkts in L.LANG_MARKETS.items() if market in mkts]
+
+
+def _content_key(store, ch, genre):
+    return (store, ch, genre or "total")
+
+
+def _build_hreflang_maps(mode: str) -> dict[tuple, dict[str, str]]:
+    """为每个内容组构建 {hreflang_code: url}。只纳入本轮会实际生成的语言×市场页面。"""
+    result: dict[tuple, dict[str, str]] = {}
+    markets = C.PILOT_MARKETS if mode == "sample" else C.ALL_MARKETS
+    charts = [C.PILOT_CHART] if mode == "sample" else C.ALL_CHARTS
+    for store in C.ALL_STORES:
+        for ch in charts:
+            genres = ([None] + ([C.GENRE_BY_STORE[store]] if store in C.GENRE_BY_STORE else []))
+            if mode == "sample":
+                genres = list(C.PILOT_GENRES)
+            for g in genres:
+                key = _content_key(store, ch, g)
+                mapping: dict[str, str] = {}
+                # 英文：所有市场，按市场 hreflang 码
+                for m in markets:
+                    mapping[C.hreflang_code(m, "en")] = page_url("en", store, m, ch, g)
+                # 其他语言：仅覆盖本语言市场的页面
+                for lang in L.NON_EN_LANGS:
+                    for m in L.LANG_MARKETS[lang]:
+                        if m in markets:
+                            mapping[L.hreflang_code(lang, m)] = page_url(lang, store, m, ch, g)
+                # x-default 指向英文美国页（若本轮生成 us）
+                if "us" in markets:
+                    mapping["x-default"] = page_url("en", store, "us", ch, g)
+                result[key] = mapping
+    return result
 
 
 def main():
@@ -890,21 +987,28 @@ def main():
     print(f"[i] latest source date: {date}  mode={args.mode}")
 
     jobs = build_jobs(args.mode)
-    print(f"[i] jobs to process: {len(jobs)}")
+    print(f"[i] data jobs to fetch: {len(jobs)}")
 
-    # 分 store+chart+genre 组构建 sibling URL（hreflang 互指）
-    def page_url(store: str, m: str, ch: str, g: str | None) -> str:
-        parts = [store, m, "top", ch] + ([g] if g else [])
-        return f"{C.SITE['base_url']}/{'/'.join(parts)}/"
+    # 每个内容组的 hreflang 映射（含语言变体）
+    hreflang_by_key = _build_hreflang_maps(args.mode)
 
-    groups_by_key: dict[tuple, dict[str, str]] = {}
-    markets_all = C.ALL_MARKETS
+    # 每个语言实际生成的页面集合：用于语言切换器判断是否提供对应页。
+    # 用"每个内容组里该语言对应的 URL 集合"精确构建，避免与英文页的
+    # zh-Hant-XX 码（英文站历史用法）混淆。
+    lang_pages: dict[str, set[str]] = {lg: set() for lg in ["en"] + L.NON_EN_LANGS}
+    markets_scope = C.PILOT_MARKETS if args.mode == "sample" else C.ALL_MARKETS
     for store in C.ALL_STORES:
-        for ch in C.ALL_CHARTS:
-            for g in [None] + ([C.GENRE_BY_STORE[store]] if store in C.GENRE_BY_STORE else []):
-                groups_by_key[(store, ch, g or "total")] = {
-                    m: page_url(store, m, ch, g) for m in markets_all
-                }
+        charts = [C.PILOT_CHART] if args.mode == "sample" else C.ALL_CHARTS
+        genres = list(C.PILOT_GENRES) if args.mode == "sample" else (
+            [None] + ([C.GENRE_BY_STORE[store]] if store in C.GENRE_BY_STORE else []))
+        for ch in charts:
+            for g in genres:
+                for m in markets_scope:
+                    lang_pages["en"].add(page_url("en", store, m, ch, g))
+                for lg, mkts in L.LANG_MARKETS.items():
+                    for m in mkts:
+                        if m in markets_scope:
+                            lang_pages[lg].add(page_url(lg, store, m, ch, g))
 
     # 增量状态
     state = INC.load_state(args.state)
@@ -912,7 +1016,7 @@ def main():
     is_new_day = state.get("date") != date
     print(f"[i] state date={state.get('date')}  is_new_day={is_new_day}")
 
-    # ---- 并发拉取所有 ranking（网络等待从 N×延迟 降到 ~N/workers 批）----
+    # ---- 并发拉取所有 ranking ----
     def fetch_one(job):
         store, market, ch, genre = job
         try:
@@ -932,7 +1036,7 @@ def main():
                 fetched.append((job, data))
     print(f"[i] fetched {len(fetched)} rankings with data")
 
-    # ---- 并发拉取所需 trend（按 store:market:ch 去重）----
+    # ---- 并发拉取 trend ----
     trend_keys = sorted({(j[0], j[1], j[2]) for j, _ in fetched})
     trend_cache: dict[str, dict] = {}
     def fetch_trend(tk):
@@ -945,45 +1049,52 @@ def main():
             trend_cache[":".join(tk)] = td
     print(f"[i] fetched {len(trend_cache)} trends")
 
-    # ---- 串行渲染（本地 IO，快）----
-    urls, groups = [], {}
+    # ---- 按语言渲染 ----
+    urls_by_lang: dict[str, list[tuple[str, str]]] = {lg: [] for lg in ["en"] + L.NON_EN_LANGS}
+    groups: dict[str, dict[str, str]] = {}
     new_state_pages: dict[str, str] = {}
     changed_urls: list[str] = []
     skipped = 0
+    rendered = 0
 
     for (store, market, ch, genre), data in fetched:
-        try:
-            rows = data.get("rows", [])
-            tkey = f"{store}:{market}:{ch}"
-            url = page_url(store, market, ch, genre)
-            fp = INC.fingerprint(rows)
-            dest_check = Path(out) / "/".join(
-                [store, market, "top", ch] + ([genre] if genre else [])) / "index.html"
+        rows = data.get("rows", [])
+        tkey = f"{store}:{market}:{ch}"
+        fp = INC.fingerprint(rows)
+        key = _content_key(store, ch, genre)
+        hl_mapping = hreflang_by_key.get(key, {})
+        for lang in _langs_for_market(market):
+            url = page_url(lang, store, market, ch, genre)
+            rel = page_rel_dir(lang, store, market, ch, genre).lstrip("/")
+            dest_check = Path(out) / rel / "index.html"
             changed = INC.is_changed(prev_pages.get(url), fp, is_new_day) or not dest_check.exists()
+            new_state_pages[url] = fp
+            urls_by_lang[lang].append((url, date))
             if not changed:
                 skipped += 1
-                new_state_pages[url] = fp
-                urls.append((url, date))
-                key = (store, ch, genre or "total")
-                groups[url] = _map_to_codes(groups_by_key.get(key, {}))
+                groups[url] = dict(hl_mapping)
                 continue
+            try:
+                ins = compute_insights(rows, trend_cache[tkey], date, market, ch, lang=lang)
+                dest, url, hl_map = render_page(lang, store, market, ch, date, genre,
+                                                rows, trend_cache[tkey], ins, hl_mapping,
+                                                lang_pages, out)
+                groups[url] = hl_map
+                changed_urls.append(url)
+                rendered += 1
+                print(f"[ok] [{lang}] {dest}")
+            except Exception as e:
+                print(f"[ERR] render [{lang}] {store}/{market}/{ch}/{genre}: {e}", file=sys.stderr)
 
-            ins = compute_insights(rows, trend_cache[tkey], date, market, ch, lang="en")
-            sibling_urls = groups_by_key[(store, ch, genre or "total")]
-            dest, url, hl_map = render_page(store, market, ch, date, genre,
-                                            rows, trend_cache[tkey], ins, sibling_urls, out)
-            groups[url] = hl_map
-            urls.append((url, date))
-            new_state_pages[url] = fp
-            changed_urls.append(url)
-            print(f"[ok] {dest}")
-        except Exception as e:
-            print(f"[ERR] render {store}/{market}/{ch}/{genre}: {e}", file=sys.stderr)
+    # ---- 各语言首页 ----
+    home_pages = []
+    for lang in ["en"] + L.NON_EN_LANGS:
+        h = write_homepage(lang, urls_by_lang[lang], out, date)
+        home_pages.append((home_url(lang), date))
+        print(f"[ok] home [{lang}] {h}")
 
-    write_homepage(urls, out, date)          # 根首页 /index.html（导航枢纽）
-    # sitemap 纳入首页
-    home_url = f"{C.SITE['base_url'].rstrip('/')}/"
-    write_sitemap([(home_url, date)] + urls, out)
+    all_urls = home_pages + [u for lang in ["en"] + L.NON_EN_LANGS for u in urls_by_lang[lang]]
+    write_sitemap(all_urls, out)
     write_robots(out)
     INC.save_state(args.state, date, new_state_pages)
 
@@ -991,10 +1102,9 @@ def main():
     if errs:
         print(f"[!] hreflang issues ({len(errs)}):", errs[:5], file=sys.stderr)
 
-    print(f"\n[done] {len(urls)} pages in sitemap; {len(changed_urls)} changed/created; "
+    print(f"\n[done] {len(all_urls)} URLs in sitemap; {rendered} pages rendered/updated; "
           f"{skipped} unchanged skipped → {out}/")
 
-    # IndexNow 提交（仅变化 URL）
     if changed_urls and not args.no_indexnow:
         key_file = INC.write_key_file(out, C.INDEXNOW_KEY)
         if key_file:
@@ -1004,15 +1114,6 @@ def main():
     elif changed_urls:
         print(f"[indexnow] skipped by flag; {len(changed_urls)} URLs would be submitted.")
 
-
-def _map_to_codes(sibling_urls: dict[str, str]) -> dict[str, str]:
-    """从 {market: url} 反推 {hreflang_code: url}，用于未重渲染页的校验记录。"""
-    mapping = {}
-    for m, url in sibling_urls.items():
-        mapping[C.hreflang_code(m, "en")] = url
-    if "us" in sibling_urls:
-        mapping["x-default"] = sibling_urls["us"]
-    return mapping
 
 if __name__ == "__main__":
     main()

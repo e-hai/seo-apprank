@@ -19,9 +19,9 @@ UA = "AppRankSeoBot/1.0 (+https://apprank.pages.dev; data from App Store officia
 # 榜单类型
 # ---------------------------------------------------------------------------
 CHARTS = {
-    "free":     {"en": "Top Free",    "zh": "免费榜"},
-    "paid":     {"en": "Top Paid",    "zh": "付费榜"},
-    "grossing": {"en": "Top Grossing", "zh": "畅销榜"},
+    "free":     {"en": "Top Free",     "zh": "免费榜",   "ko": "무료 순위",      "ja": "無料ランキング", "tr": "Ücretsiz"},
+    "paid":     {"en": "Top Paid",     "zh": "付费榜",   "ko": "유료 순위",      "ja": "有料ランキング", "tr": "Ücretli"},
+    "grossing": {"en": "Top Grossing", "zh": "畅销榜",   "ko": "매출 순위",      "ja": "売上ランキング", "tr": "Hasılat"},
 }
 STORES = {
     "app_store": {"en": "App Store",     "zh": "App Store"},
@@ -61,10 +61,21 @@ MARKET_NAMES = {
     "ke": ("Kenya", "肯尼亚"),
 }
 
+# 各语言版本的本族市场名（仅覆盖该语言实际使用的市场，其余回退到英文名）
+LOCAL_MARKET_NAMES = {
+    "ko": {"kr": "한국"},
+    "ja": {"jp": "日本"},
+    "zh": {"tw": "中国台湾", "hk": "中国香港", "mo": "中国澳门"},
+    "tr": {"tr": "Türkiye"},
+}
+
+
 def market_name(code: str, lang: str = "en") -> str:
-    """返回市场显示名。lang: 'en' 或 'zh'。"""
+    """返回市场显示名。英文用英文名，中文用规范中文名，其他语言优先本族市场名。"""
+    if lang in LOCAL_MARKET_NAMES and code in LOCAL_MARKET_NAMES[lang]:
+        return LOCAL_MARKET_NAMES[lang][code]
     pair = MARKET_NAMES.get(code, (code.upper(), code.upper()))
-    return pair[0] if lang == "en" else pair[1]
+    return pair[0] if lang != "zh" else pair[1]
 
 # ---------------------------------------------------------------------------
 # hreflang 语言/地区码（ISO 639-1 + ISO 3166-1 Alpha-2）
@@ -93,7 +104,15 @@ def genre_label(name: str, lang: str = "en") -> str:
     """把数据源的中文品类名转成页面显示名；未知值原样返回。"""
     if lang == "en":
         return GENRE_LABELS.get(name, name)
-    return name
+    if lang == "zh":
+        return name  # 数据源就是中文
+    # 数据源品类名的本地化（游戏 / 总榜）
+    table = {
+        "ko": {"游戏": "게임", "总榜": "전체", "GAME": "게임"},
+        "ja": {"游戏": "ゲーム", "总榜": "総合", "GAME": "ゲーム"},
+        "tr": {"游戏": "Oyunlar", "总榜": "Genel", "GAME": "Oyunlar"},
+    }.get(lang, {})
+    return table.get(name, name)
 
 # ---------------------------------------------------------------------------
 # 首批落地市场（P0 样本：先小后大，验证收录再扩量）
