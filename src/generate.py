@@ -152,27 +152,46 @@ def compute_insights(rows: list[dict], trend: dict, date: str, market: str, char
 # ---------------------------------------------------------------------------
 # SVG 趋势图（服务端生成，无第三方库）
 # ---------------------------------------------------------------------------
-def trend_svg(series: list[dict], width: int = 640, height: int = 180) -> str:
-    """series: [{date, best_rank, name}, ...]，排名越小越靠前（y 轴反转）。"""
+def trend_svg(series: list[dict], width: int = 640, height: int = 180, uid: str = "t") -> str:
+    """series: [{date, best_rank, name}, ...]，排名越小越靠前（y 轴反转）。
+    带渐变面积、网格线与端点标记的现代化图表。uid 保证多图 defs id 唯一。"""
     if not series:
         return ""
     pts = []
     n = len(series)
+    top_pad, bot_pad = 16, 26
     for i, p in enumerate(series):
-        x = 10 + i * (width - 20) / max(n - 1, 1)
-        rank = p.get("best_rank") or 30
-        y = 10 + (min(rank, 30) - 1) / 29 * (height - 20)
-        pts.append(f"{x:.1f},{y:.1f}")
-    polyline = " ".join(pts)
+        x = 14 + i * (width - 28) / max(n - 1, 1)
+        rank = min(p.get("best_rank") or 30, 30)
+        y = top_pad + (rank - 1) / 29 * (height - top_pad - bot_pad)
+        pts.append((x, y))
+    polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    line_path = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area_path = line_path + f" L {pts[-1][0]:.1f},{height-bot_pad} L {pts[0][0]:.1f},{height-bot_pad} Z"
     first = html.escape(str(series[0].get("date", "")))
     last = html.escape(str(series[-1].get("date", "")))
+    fx, fy = pts[0]
+    lx, ly = pts[-1]
+    grid = ""
+    for g in (8, 16, 24):
+        gy = top_pad + g / 29 * (height - top_pad - bot_pad)
+        grid += (f'<line x1="14" y1="{gy:.1f}" x2="{width-14}" y2="{gy:.1f}" '
+                 f'stroke="#eef1f6" stroke-width="1" stroke-dasharray="3 4"/>')
     return (
         f'<svg viewBox="0 0 {width} {height}" role="img" '
-        f'aria-label="Rank history from {first} to {last}" '
-        f'style="width:100%;height:auto;background:#fff">'
-        f'<polyline fill="none" stroke="#1a73e8" stroke-width="2.5" points="{polyline}"/>'
-        f'<text x="10" y="{height-2}" font-size="11" fill="#666">{first}</text>'
-        f'<text x="{width-70}" y="{height-2}" font-size="11" fill="#666">{last}</text>'
+        f'aria-label="Rank history from {first} to {last}" class="spark-svg">'
+        f'<defs><linearGradient id="fill-{uid}" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="#4f46e5" stop-opacity="0.28"/>'
+        f'<stop offset="100%" stop-color="#4f46e5" stop-opacity="0.02"/>'
+        f'</linearGradient></defs>'
+        f'{grid}'
+        f'<path d="{area_path}" fill="url(#fill-{uid})"/>'
+        f'<path d="{line_path}" fill="none" stroke="#4f46e5" stroke-width="2.5" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{fx:.1f}" cy="{fy:.1f}" r="3.5" fill="#fff" stroke="#4f46e5" stroke-width="2"/>'
+        f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="4" fill="#4f46e5" stroke="#fff" stroke-width="2"/>'
+        f'<text x="14" y="{height-7}" font-size="11" fill="#8b93a3">{first}</text>'
+        f'<text x="{width-14}" y="{height-7}" font-size="11" fill="#8b93a3" text-anchor="end">{last}</text>'
         f'</svg>'
     )
 
@@ -264,6 +283,258 @@ def validate_hreflang(groups: dict[str, dict[str, str]]) -> list[str]:
 # ---------------------------------------------------------------------------
 # 页面渲染
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 共享视觉设计系统 —— CSS 与 JS 均为独立常量，通过 format 占位符注入。
+# 好处：CSS/JS 里的大括号无需在模板里转义，且首页与榜单页共用同一套样式。
+# ---------------------------------------------------------------------------
+STYLE = r"""
+:root{
+  --bg:#f5f7fb;--surface:#fff;--line:#e8ebf2;--line-soft:#f0f2f7;
+  --ink:#0f172a;--ink-2:#334155;--muted:#64748b;--muted-2:#94a3b8;
+  --accent:#4f46e5;--accent-2:#7c3aed;--accent-soft:#eef2ff;
+  --up:#059669;--up-soft:#ecfdf5;--down:#e11d48;--down-soft:#fff1f2;
+  --new:#2563eb;--new-soft:#eff6ff;--warn:#b45309;--warn-soft:#fffbeb;
+  --radius:16px;--radius-sm:10px;
+  --shadow:0 1px 2px rgba(15,23,42,.04),0 8px 28px rgba(15,23,42,.05);
+  --shadow-lg:0 12px 40px rgba(15,23,42,.10);
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  color:var(--ink-2);background:var(--bg);-webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+h1,h2,h3{color:var(--ink);letter-spacing:-.02em}
+
+/* Top bar */
+.topbar{background:#0f172a;color:#fff;border-bottom:1px solid #1e293b}
+.topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:62px;flex-wrap:wrap}
+.brand{display:inline-flex;align-items:center;gap:10px;color:#fff;font-weight:700;font-size:1.05rem;letter-spacing:-.02em}
+.brand:hover{text-decoration:none;color:#fff}
+.brand-ico{display:grid;place-items:center;width:32px;height:32px;border-radius:9px;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));font-size:1rem;font-weight:800;
+  box-shadow:0 4px 14px rgba(79,70,229,.45)}
+.brand-dot{color:#a5b4fc}
+.crumb{font-size:.84rem;color:#94a3b8}
+.crumb a{color:#cbd5e1}
+.crumb .sep{margin:0 8px;color:#475569}
+
+/* Hero */
+.hero{padding:34px 0 26px}
+.hero-eyebrow{display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);background:var(--accent-soft);padding:6px 12px;border-radius:999px;margin-bottom:14px}
+.hero h1{font-size:clamp(1.7rem,3.4vw,2.4rem);line-height:1.2;margin:0 0 10px;font-weight:750}
+.hero-sub{color:var(--muted);font-size:1rem;margin:0 0 18px;max-width:760px}
+.meta-row{display:flex;gap:10px;flex-wrap:wrap}
+.meta-pill{display:inline-flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--line);
+  border-radius:999px;padding:6px 13px;font-size:.8rem;color:var(--muted)}
+.meta-pill b{color:var(--ink-2);font-weight:650}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:0 0 auto}
+
+/* Insight */
+.insight-card{display:flex;gap:16px;align-items:flex-start;background:linear-gradient(135deg,#eef2ff,#faf5ff);
+  border:1px solid #e0e7ff;border-radius:var(--radius);padding:18px 20px;margin:6px 0 22px}
+.insight-icon{flex:0 0 auto;width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+  background:#fff;color:var(--accent);font-size:1.15rem;box-shadow:var(--shadow)}
+.insight-label{font-size:.74rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
+.insight-card p{margin:0;color:var(--ink-2);font-size:.96rem;line-height:1.65}
+
+/* Stat grid */
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);
+  padding:16px 18px;box-shadow:var(--shadow)}
+.stat-k{font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted-2)}
+.stat-v{font-size:1.3rem;font-weight:750;color:var(--ink);margin-top:7px;line-height:1.25;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat-v.accent{color:var(--accent)}
+.stat-s{font-size:.78rem;color:var(--muted);margin-top:3px}
+
+/* Panels */
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:22px;margin-bottom:22px}
+.panel-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+.panel h2{font-size:1.22rem;margin:0;font-weight:700}
+.panel-sub{color:var(--muted);font-size:.84rem;margin:4px 0 0}
+.muted-sm{font-size:.82rem;color:var(--muted-2);font-weight:500;margin-left:8px}
+.result-count{font-size:.82rem;color:var(--muted)}
+.result-count b{color:var(--accent)}
+
+/* Toolbar */
+.toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.search{position:relative;flex:1 1 260px}
+.search input{width:100%;padding:10px 14px 10px 38px;border:1px solid var(--line);border-radius:var(--radius-sm);
+  font-size:.9rem;background:#fbfcfe;color:var(--ink);outline:none;transition:border-color .15s,box-shadow .15s}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.search .ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);color:var(--muted-2);font-size:.95rem}
+.segments{display:inline-flex;background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-sm);padding:3px;gap:2px}
+.seg{border:0;background:transparent;color:var(--muted);font-size:.82rem;font-weight:600;padding:7px 13px;
+  border-radius:7px;cursor:pointer;transition:.15s;white-space:nowrap;font-family:inherit}
+.seg:hover{color:var(--ink)}
+.seg.active{background:var(--surface);color:var(--accent);box-shadow:var(--shadow)}
+
+/* Table */
+.table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius-sm)}
+table.rank{width:100%;border-collapse:collapse;font-size:.9rem;min-width:720px}
+table.rank thead th{position:sticky;top:0;background:#fafbfe;text-align:left;font-size:.72rem;
+  letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:700;padding:12px 14px;
+  border-bottom:1px solid var(--line);cursor:pointer;user-select:none;white-space:nowrap}
+table.rank thead th:hover{color:var(--accent)}
+table.rank thead th .arrow{color:var(--muted-2);margin-left:4px;font-size:.7rem}
+table.rank tbody td{padding:12px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+table.rank tbody tr:last-child td{border-bottom:0}
+table.rank tbody tr{transition:background .12s}
+table.rank tbody tr:hover{background:#fafbff}
+.rk{display:inline-grid;place-items:center;min-width:30px;height:30px;padding:0 6px;border-radius:9px;
+  font-weight:700;font-size:.82rem;background:var(--bg);color:var(--muted);font-variant-numeric:tabular-nums}
+.rk.gold{background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#fff;box-shadow:0 3px 10px rgba(245,158,11,.35)}
+.rk.silver{background:linear-gradient(135deg,#cbd5e1,#94a3b8);color:#fff}
+.rk.bronze{background:linear-gradient(135deg,#fdba74,#ea580c);color:#fff}
+.app-cell{display:flex;align-items:center;gap:11px}
+.app-logo{flex:0 0 auto;width:36px;height:36px;border-radius:10px;display:grid;place-items:center;
+  font-weight:750;font-size:.95rem;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent-2))}
+.app-name{font-weight:650;color:var(--ink);line-height:1.3}
+.app-dev{font-size:.76rem;color:var(--muted);margin-top:1px}
+.genre-pill{display:inline-block;font-size:.75rem;color:var(--accent);background:var(--accent-soft);
+  padding:4px 10px;border-radius:999px;font-weight:600}
+.rating-cell{white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink-2)}
+.star{color:#f59e0b;margin-right:3px}
+.move{display:inline-flex;align-items:center;gap:4px;font-size:.8rem;font-weight:700;padding:4px 9px;
+  border-radius:999px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.move.up{color:var(--up);background:var(--up-soft)}
+.move.down{color:var(--down);background:var(--down-soft)}
+.move.new{color:var(--new);background:var(--new-soft)}
+.move.flat{color:var(--muted-2);background:var(--bg)}
+.empty-row td{text-align:center;color:var(--muted);padding:36px}
+
+/* Matrix directory table (homepage) */
+table.matrix{width:100%;border-collapse:collapse;font-size:.84rem;min-width:680px}
+table.matrix thead th{background:#fafbfe;color:var(--muted);font-size:.72rem;letter-spacing:.06em;
+  text-transform:uppercase;font-weight:700;padding:12px 14px;text-align:left;border-bottom:1px solid var(--line)}
+table.matrix tbody td{border-bottom:1px solid var(--line-soft);padding:10px 14px}
+table.matrix tbody tr:hover{background:#fafbff}
+table.matrix td.mkt{font-weight:650;color:var(--ink);white-space:nowrap;position:sticky;left:0;background:#fff}
+.chart-link{display:inline-block;font-size:.78rem;font-weight:600;color:var(--accent);
+  background:var(--accent-soft);padding:3px 9px;border-radius:7px;white-space:nowrap}
+.chart-link:hover{background:var(--accent);color:#fff;text-decoration:none}
+.dash{color:#cbd5e1}
+
+/* Spark grid */
+.spark-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.spark-card{background:linear-gradient(180deg,#fcfdff,#fff);border:1px solid var(--line);border-radius:var(--radius-sm);padding:14px 16px}
+.spark-card h3{font-size:.92rem;margin:0 0 2px;font-weight:650}
+.spark-meta{font-size:.76rem;color:var(--muted);margin:0 0 8px}
+.spark-svg{width:100%;height:auto;display:block;border-radius:8px}
+
+/* Two column */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.two-col .panel{margin-bottom:22px}
+.prose p{color:var(--ink-2);margin:0;font-size:.92rem;line-height:1.7}
+details{border-bottom:1px solid var(--line-soft)}
+details:last-child{border-bottom:0}
+summary{cursor:pointer;padding:11px 0;font-weight:650;font-size:.9rem;color:var(--ink);list-style:none;
+  display:flex;align-items:center;justify-content:space-between;gap:12px}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";color:var(--accent);font-size:1.1rem;font-weight:500;flex:0 0 auto}
+details[open] summary::after{content:"\2212"}
+details p{margin:0 0 12px;color:var(--muted);font-size:.86rem;line-height:1.6}
+
+/* Footer */
+footer{background:#0f172a;color:#94a3b8;padding:28px 0 34px;font-size:.82rem;line-height:1.7}
+footer .wrap{max-width:1120px}
+footer a{color:#a5b4fc}
+footer p{margin:5px 0}
+.footer-brand{color:#fff;font-weight:700;font-size:.95rem;margin-bottom:8px}
+
+/* Responsive */
+@media(max-width:900px){
+  .stat-grid{grid-template-columns:repeat(2,1fr)}
+  .two-col{grid-template-columns:1fr}
+}
+@media(max-width:560px){
+  .wrap{padding:0 15px}
+  .topbar .wrap{min-height:56px}
+  .crumb{font-size:.76rem}
+  .hero{padding:24px 0 20px}
+  .hero h1{font-size:1.5rem}
+  .stat-grid{gap:10px}
+  .stat{padding:13px 14px}
+  .stat-v{font-size:1.1rem}
+  .panel{padding:16px}
+  .insight-card{padding:15px}
+  .segments{width:100%;overflow-x:auto}
+}
+"""
+
+# JS 逻辑独立成串，用 __ROWS_JSON__ 占位；注入后大括号不会被再次 format 解析。
+APP_JS = r"""
+const ROWS=__ROWS_JSON__;
+let sortKey='rank',sortDir=1,activeFilter='all';
+function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+function initial(s){return esc((s||'?').trim().charAt(0).toUpperCase());}
+function rankHtml(n){
+  const cls=n===1?'gold':n===2?'silver':n===3?'bronze':'';
+  return '<span class="rk '+cls+'">'+n+'</span>';
+}
+function moveHtml(r){
+  if(r.status==='new')return '<span class="move new">NEW</span>';
+  const c=r.rank_change||0;
+  if(c>0)return '<span class="move up">\u25B2 +'+c+'</span>';
+  if(c<0)return '<span class="move down">\u25BC '+c+'</span>';
+  return '<span class="move flat">\u2014</span>';
+}
+function ratingHtml(r){
+  if(r.rating==null)return '<span style="color:#94a3b8">\u2014</span>';
+  return '<span class="rating-cell"><span class="star">\u2605</span>'+esc(r.rating)+'</span>';
+}
+function sortBy(k){
+  if(sortKey===k){sortDir=-sortDir;}else{sortKey=k;sortDir=(k==='rank'||k==='name'||k==='developer'||k==='category')?1:-1;}
+  document.querySelectorAll('th[data-k]').forEach(th=>{
+    const a=th.querySelector('.arrow');
+    if(a)a.textContent=(th.dataset.k===sortKey)?(sortDir>0?'\u25B2':'\u25BC'):'';
+  });
+  render();
+}
+function setFilter(f,el){
+  activeFilter=f;
+  document.querySelectorAll('.seg').forEach(b=>b.classList.toggle('active',b===el));
+  render();
+}
+function render(){
+  const q=document.getElementById('q').value.toLowerCase();
+  let rs=ROWS.filter(r=>{
+    const m=(r.name+' '+r.developer).toLowerCase().includes(q);
+    const c=activeFilter==='all'||
+      (activeFilter==='up'&&(r.rank_change||0)>0)||
+      (activeFilter==='down'&&(r.rank_change||0)<0)||
+      (activeFilter==='new'&&r.status==='new');
+    return m&&c;
+  });
+  rs.sort((a,b)=>{
+    let va,vb;
+    if(sortKey==='change'){va=a.rank_change||0;vb=b.rank_change||0;}
+    else if(sortKey==='rating'){va=a.rating==null?-1:a.rating;vb=b.rating==null?-1:b.rating;}
+    else{va=a[sortKey]||'';vb=b[sortKey]||'';}
+    if(va<vb)return -1*sortDir;
+    if(va>vb)return 1*sortDir;
+    return 0;
+  });
+  document.getElementById('tb').innerHTML=rs.map(r=>
+    '<tr><td>'+rankHtml(r.curr_rank)+'</td>'+
+    '<td><div class="app-cell"><span class="app-logo">'+initial(r.name)+'</span><div>'+
+      '<div class="app-name">'+esc(r.name)+'</div><div class="app-dev">'+esc(r.developer)+'</div></div></div></td>'+
+    '<td>'+esc(r.developer)+'</td>'+
+    '<td><span class="genre-pill">'+esc(r.genre_name||'\u2014')+'</span></td>'+
+    '<td>'+ratingHtml(r)+'</td>'+
+    '<td>'+moveHtml(r)+'</td></tr>'
+  ).join('')||'<tr class="empty-row"><td colspan="6">No apps match your filters.</td></tr>';
+  document.getElementById('count').innerHTML='Showing <b>'+rs.length+'</b> of '+ROWS.length+' apps';
+}
+render();
+"""
+
 TPL = """<!doctype html>
 <html lang="{lang}">
 <head>
@@ -275,82 +546,78 @@ TPL = """<!doctype html>
 <link rel="canonical" href="{canonical}"/>
 {hreflang}
 <script type="application/ld+json">{jsonld}</script>
-<style>
-:root{{--fg:#1a1a1a;--muted:#5f6368;--line:#e0e0e0;--blue:#1a73e8}}
-*{{box-sizing:border-box}}
-body{{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--fg);max-width:960px;margin:0 auto;padding:24px;background:#fff}}
-h1{{font-size:1.9rem;line-height:1.25}} h2{{font-size:1.3rem;margin-top:2rem;border-bottom:2px solid var(--line);padding-bottom:.3rem}}
-.meta{{color:var(--muted);font-size:.9rem}} .insight{{background:#f1f7fe;border-left:4px solid var(--blue);padding:14px 18px;border-radius:4px;margin:1.2rem 0}}
-table{{border-collapse:collapse;width:100%;font-size:.92rem}} th,td{{border-bottom:1px solid var(--line);padding:9px 8px;text-align:left}} th{{cursor:pointer;background:#fafafa}}
-.up{{color:#137333}} .down{{color:#c5221f}} .new{{color:#1a73e8;font-weight:600}}
-.ctrl{{display:flex;gap:10px;flex-wrap:wrap;margin:1rem 0}} .ctrl input,.ctrl select{{padding:8px;border:1px solid var(--line);border-radius:4px}}
-footer{{margin-top:3rem;padding-top:1rem;border-top:1px solid var(--line);color:var(--muted);font-size:.85rem}}
-code{{background:#f5f5f5;padding:1px 4px;border-radius:3px}}
-</style>
+<style>{style}</style>
 </head>
 <body>
-<nav class="meta"><a href="/">Home</a> / {breadcrumb}</nav>
-<h1>{h1}</h1>
-<p class="meta">Last updated: {updated} · Data source: {source_note} · {streak_note}</p>
+<header class="topbar"><div class="wrap">
+  <a class="brand" href="/"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
+  <nav class="crumb"><a href="/">Home</a><span class="sep">/</span>{breadcrumb}</nav>
+</div></header>
 
-<div class="insight"><strong>What changed today</strong><br/>{insight}</div>
+<main class="wrap">
+  <section class="hero">
+    <span class="hero-eyebrow">Daily chart \u00b7 {mkt} \u00b7 {ch}</span>
+    <h1>{h1}</h1>
+    <p class="hero-sub">A point-in-time snapshot of the top apps, with daily rank movement,
+      historical position and insights computed from the real data.</p>
+    <div class="meta-row">
+      <span class="meta-pill"><span class="dot"></span>Last updated <b>{updated}</b></span>
+      <span class="meta-pill"><span class="dot"></span>Source <b>{source_note}</b></span>
+      {streak_note}
+    </div>
+  </section>
 
-<h2>Methodology</h2>
-<p>{methodology}</p>
+  <section class="insight-card">
+    <div class="insight-icon">\u2726</div>
+    <div><div class="insight-label">What changed today</div><p>{insight}</p></div>
+  </section>
 
-<h2>Top 30 right now</h2>
-<div class="ctrl">
-  <input id="q" placeholder="Filter by app or developer…" oninput="render()"/>
-  <select id="chg" onchange="render()">
-    <option value="all">All movements</option>
-    <option value="up">Climbers only</option>
-    <option value="down">Falling only</option>
-    <option value="new">New entries</option>
-  </select>
-</div>
-<table id="t"><thead><tr>
-<th onclick="sortBy('rank')">#</th><th onclick="sortBy('name')">App</th><th onclick="sortBy('developer')">Developer</th>
-<th onclick="sortBy('category')">Category</th><th onclick="sortBy('rating')">Rating</th><th onclick="sortBy('change')">Move</th>
-</tr></thead><tbody id="tb"></tbody></table>
+  <div class="stat-grid">{stats}</div>
 
-<h2>Rank history (top 5)</h2>
-{spark}
+  <section class="panel">
+    <div class="panel-head">
+      <div><h2>Top apps right now</h2><p class="panel-sub">Search, filter by movement, or click any column to sort.</p></div>
+      <span class="result-count" id="count"></span>
+    </div>
+    <div class="toolbar">
+      <label class="search"><span class="ico">\u26b2</span>
+        <input id="q" type="search" placeholder="Filter by app or developer\u2026" oninput="render()"/></label>
+      <div class="segments">
+        <button class="seg active" data-f="all" onclick="setFilter('all',this)">All</button>
+        <button class="seg" data-f="up" onclick="setFilter('up',this)">Climbers</button>
+        <button class="seg" data-f="down" onclick="setFilter('down',this)">Falling</button>
+        <button class="seg" data-f="new" onclick="setFilter('new',this)">New</button>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="rank"><thead><tr>
+        <th data-k="rank" onclick="sortBy('rank')">#<span class="arrow"></span></th>
+        <th data-k="name" onclick="sortBy('name')">App<span class="arrow"></span></th>
+        <th data-k="developer" onclick="sortBy('developer')">Developer<span class="arrow"></span></th>
+        <th data-k="category" onclick="sortBy('category')">Category<span class="arrow"></span></th>
+        <th data-k="rating" onclick="sortBy('rating')">Rating<span class="arrow"></span></th>
+        <th data-k="change" onclick="sortBy('change')">Move<span class="arrow"></span></th>
+      </tr></thead><tbody id="tb"></tbody></table>
+    </div>
+  </section>
 
-<h2>FAQ</h2>
-{faq}
+  <section class="panel">
+    <h2>Rank history <span class="muted-sm">top 5 \u00b7 best position by day</span></h2>
+    <div class="spark-grid">{spark}</div>
+  </section>
 
-<footer>
-{attribution}
-<p>Last updated {updated}. Rankings are a point-in-time sample and may differ from real-time store placement.</p>
-</footer>
-<script>
-const ROWS={rows_json};
-let sortKey='rank',sortDir=1;
-function sortBy(k){{sortDir=(sortKey===k)?-sortDir:1;sortKey=k;render();}}
-function render(){{
-  const q=document.getElementById('q').value.toLowerCase();
-  const f=document.getElementById('chg').value;
-  let rs=ROWS.filter(r=>{{
-    const m=(r.name+' '+r.developer).toLowerCase().includes(q);
-    const c=f==='all'||(f==='up'&&r.rank_change>0)||(f==='down'&&r.rank_change<0)||(f==='new'&&r.status==='new');
-    return m&&c;
-  }});
-  rs.sort((a,b)=>{{
-    let va=a[sortKey],vb=b[sortKey];
-    if(sortKey==='change'){{va=a.rank_change||0;vb=b.rank_change||0;}}
-    if(va<vb)return -1*sortDir; if(va>vb)return 1*sortDir; return 0;
-  }});
-  document.getElementById('tb').innerHTML=rs.map(r=>{{
-    const ch=r.status==='new'?'<span class="new">NEW</span>':
-      (r.rank_change>0?'<span class="up">▲ +'+r.rank_change+'</span>':
-       r.rank_change<0?'<span class="down">▼ '+r.rank_change+'</span>':'—');
-    return `<tr><td>${{r.curr_rank}}</td><td>${{esc(r.name)}}</td><td>${{esc(r.developer)}}</td>`+
-      `<td>${{esc(r.genre_name||'')}}</td><td>${{r.rating!=null?r.rating:'—'}}</td><td>${{ch}}</td></tr>`;
-  }}).join('')||'<tr><td colspan="6">No apps match.</td></tr>';
-}}
-function esc(s){{const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}}
-render();
-</script>
+  <div class="two-col">
+    <section class="panel prose"><h2>Methodology</h2><p>{methodology}</p></section>
+    <section class="panel"><h2>Good to know</h2>{faq}</section>
+  </div>
+</main>
+
+<footer><div class="wrap">
+  <div class="footer-brand">AppRank<span class="brand-dot">.</span>Index</div>
+  <p>{attribution}</p>
+  <p>Last updated {updated}. Rankings are a point-in-time sample and may differ from real-time store placement.</p>
+</div></footer>
+<script>{app_js}</script>
 </body>
 </html>
 """
@@ -370,30 +637,55 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
     url = f"{C.SITE['base_url']}/{rel_dir}/"
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    source_note = "Apple App Store official charts (via e-hai/Appstore_Top_30 open dataset)"
+    source_note = "App Store official charts"
     if store == "play":
-        source_note = "Google Play official charts (via e-hai/Appstore_Top_30 open dataset)"
+        source_note = "Google Play official charts"
     methodology = (
-        f"This page ranks the top 30 apps on the {ch} chart in {mkt} for {date}. "
+        f"This page ranks the top apps on the {ch} chart in {mkt} for {date}. "
         f"Data is pulled from a daily snapshot of official storefront charts, sampled once per day. "
         f"Rank movement compares against the previous available day. "
         f"Ratings and developer names are shown as provided by the source. "
         f"This is a point-in-time sample, not a real-time feed."
     )
-    streak_note = (f"Longest observed streak among top 10: {insights['longest_streak']} days"
-                   if insights['longest_streak'] else "")
+    streak_note = (
+        f'<span class="meta-pill"><span class="dot"></span>Longest streak <b>'
+        f'{insights["longest_streak"]} days</b></span>'
+        if insights['longest_streak'] else ""
+    )
+
+    # 统计卡片：由当日真实数据计算
+    top = rows[0] if rows else {}
+    risers = insights.get("risers") or []
+    biggest = risers[0] if risers else None
+    def stat(k, v, s="", accent=False):
+        vc = " accent" if accent else ""
+        return (f'<div class="stat"><div class="stat-k">{html.escape(k)}</div>'
+                f'<div class="stat-v{vc}" title="{html.escape(str(v))}">{html.escape(str(v))}</div>'
+                + (f'<div class="stat-s">{html.escape(str(s))}</div>' if s else "") + '</div>')
+    stats = "".join([
+        stat("#1 right now", top.get("name", "\u2014"),
+             f'{ch} in {mkt}', accent=True),
+        stat("New this snapshot", str(insights["new_count"]), "apps entering the board"),
+        stat("Biggest climber", biggest["name"] if biggest else "\u2014",
+             (f'+{biggest["rank_change"]} spots' if biggest else "no movement")),
+        stat("Top developer", insights["top_dev"] or "\u2014",
+             f'{insights["top_dev_n"]} apps on the board'),
+    ])
 
     # 趋势 SVG：取前 5 名中在趋势里有数据的
     spark_parts = []
     trend_map = trend.get("trends", {})
-    for r in rows[:5]:
+    for i, r in enumerate(rows[:5]):
         s = trend_map.get(r.get("app_id"), [])
         if s:
+            recent = s[-30:]
             spark_parts.append(
-                f'<h3>{html.escape(r["name"])}</h3>{trend_svg(s[-30:])}'
-                f'<p class="meta">Best rank over {len(s[-30:])} observed days</p>'
+                f'<div class="spark-card"><h3>{html.escape(r["name"])}</h3>'
+                f'<p class="spark-meta">Best rank over {len(recent)} observed days</p>'
+                f'{trend_svg(recent, uid=f"c{i}")}</div>'
             )
-    spark = "\n".join(spark_parts) or "<p class='meta'>Trend data not yet available for this market.</p>"
+    spark = ("\n".join(spark_parts) or
+             "<p class='muted-sm'>Trend data not yet available for this market.</p>")
 
     faq = (
         "<details><summary>How often is this data updated?</summary>"
@@ -424,14 +716,14 @@ def render_page(store, market, chart, date, genre, rows, trend, insights, siblin
         "status": r.get("status", ""),
     } for r in rows]
 
+    app_js = APP_JS.replace("__ROWS_JSON__", json.dumps(js_rows, ensure_ascii=False))
     page = TPL.format(
         lang=lang, title=html.escape(title), description=html.escape(description),
-        canonical=url, hreflang=hl, jsonld=jsonld,
-        breadcrumb=f"{mkt} / {ch}", h1=html.escape(h1),
+        canonical=url, hreflang=hl, jsonld=jsonld, style=STYLE, app_js=app_js,
+        breadcrumb=f"{mkt} / {ch}", h1=html.escape(h1), mkt=html.escape(mkt), ch=html.escape(ch),
         updated=updated, source_note=source_note, streak_note=streak_note,
-        insight=insights["insight"], methodology=methodology,
-        spark=spark, faq=faq, attribution=attribution,
-        rows_json=json.dumps(js_rows, ensure_ascii=False),
+        insight=html.escape(insights["insight"]), methodology=html.escape(methodology),
+        stats=stats, spark=spark, faq=faq, attribution=attribution,
     )
     dest = Path(out_root) / rel_dir / "index.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -451,74 +743,97 @@ def write_homepage(urls: list[tuple[str, str]], out_root: str, date: str):
         parts = [store, m, "top", ch] + ([g] if g else [])
         url = f"{base}/{'/'.join(parts)}/"
         if url.rstrip("/") not in existing:
-            return "—"
-        label = C.CHARTS[ch]["en"] + (f" · {C.genre_label('游戏', 'en')}" if g else "")
-        return f'<a href="{html.escape(url)}">{html.escape(label)}</a>'
+            return '<span class="dash">\u2014</span>'
+        label = C.CHARTS[ch]["en"] + (f" \u00b7 {C.genre_label('游戏', 'en')}" if g else "")
+        return f'<a class="chart-link" href="{html.escape(url)}">{html.escape(label)}</a>'
 
-    def platform_table(store: str) -> str:
-        genre = C.GENRE_BY_STORE.get(store)
-        head = ("<tr><th>Market</th><th>Top Free</th><th>Top Paid</th><th>Top Grossing</th>"
-                "<th>Games · Free</th><th>Games · Paid</th><th>Games · Grossing</th></tr>")
-        rows = []
-        for m in C.ALL_MARKETS:
-            cells = [html.escape(C.market_name(m, "en"))]
-            cells += [cell(store, m, ch) for ch in C.ALL_CHARTS]
-            cells += [cell(store, m, ch, genre) if genre else "—" for ch in C.ALL_CHARTS]
-            rows.append("<tr><td>" + "</td><td>".join(cells) + "</td></tr>")
-        return f"<table>{head}{''.join(rows)}</table>"
-
-    css = (":root{--fg:#1a1a1a;--muted:#5f6368;--line:#e0e0e0;--blue:#1a73e8}"
-           "*{box-sizing:border-box}"
-           "body{font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;"
-           "color:var(--fg);max-width:960px;margin:0 auto;padding:24px;background:#fff}"
-           "h1{font-size:2rem;line-height:1.25} h2{font-size:1.4rem;margin-top:2rem;"
-           "border-bottom:2px solid var(--line);padding-bottom:.3rem}"
-           ".meta{color:var(--muted);font-size:.9rem}"
-           "table{border-collapse:collapse;width:100%;font-size:.82rem;margin-top:1rem}"
-           "th,td{border-bottom:1px solid var(--line);padding:7px 6px;text-align:left}"
-           "th{background:#fafafa} a{color:var(--blue);text-decoration:none}"
-           "a:hover{text-decoration:underline} footer{margin-top:3rem;padding-top:1rem;"
-           "border-top:1px solid var(--line);color:var(--muted);font-size:.85rem}")
     n = len(existing)
     desc = (f"Daily Top 30 app charts for {len(C.ALL_MARKETS)} markets across the App Store and "
             f"Google Play: free, paid, grossing and games, with rank history and insights. "
             f"Snapshot {date}.")
-    store_tables = "".join(
-        f"<h2>{html.escape(C.STORES[s]['en'])}</h2>{platform_table(s)}" for s in C.ALL_STORES)
+
+    store_panels = []
+    for s in C.ALL_STORES:
+        platform_table_rows = []
+        genre = C.GENRE_BY_STORE.get(s)
+        head = ("<tr><th>Market</th><th>Top Free</th><th>Top Paid</th><th>Top Grossing</th>"
+                "<th>Games \u00b7 Free</th><th>Games \u00b7 Paid</th><th>Games \u00b7 Grossing</th></tr>")
+        for m in C.ALL_MARKETS:
+            cells = [f'<td class="mkt">{html.escape(C.market_name(m, "en"))}</td>']
+            cells += [f"<td>{cell(s, m, ch)}</td>" for ch in C.ALL_CHARTS]
+            cells += [f"<td>{cell(s, m, ch, genre) if genre else '—'}</td>" for ch in C.ALL_CHARTS]
+            platform_table_rows.append("<tr>" + "".join(cells) + "</tr>")
+        store_panels.append(
+            f'<section class="panel"><div class="panel-head"><div>'
+            f'<h2>{html.escape(C.STORES[s]["en"])}</h2>'
+            f'<p class="panel-sub">Browse live chart pages by market and ranking type.</p>'
+            f'</div></div><div class="table-scroll"><table class="matrix">{head}'
+            f'{"".join(platform_table_rows)}</table></div></section>')
+
+    stat_grid = "".join([
+        f'<div class="stat"><div class="stat-k">Markets</div>'
+        f'<div class="stat-v accent">{len(C.ALL_MARKETS)}</div>'
+        f'<div class="stat-s">storefronts worldwide</div></div>',
+        f'<div class="stat"><div class="stat-k">Chart pages</div>'
+        f'<div class="stat-v">{n}</div><div class="stat-s">indexed &amp; updated daily</div></div>',
+        f'<div class="stat"><div class="stat-k">Platforms</div>'
+        f'<div class="stat-v">2</div><div class="stat-s">App Store &amp; Google Play</div></div>',
+        f'<div class="stat"><div class="stat-k">Last snapshot</div>'
+        f'<div class="stat-v" style="font-size:1.05rem">{html.escape(date)}</div>'
+        f'<div class="stat-s">fresh data every day</div></div>',
+    ])
+    store_panels_html = "\n".join(store_panels)
     page = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{html.escape(C.SITE['name'])} — Daily App Store &amp; Google Play Top 30 Charts</title>
+<title>{html.escape(C.SITE['name'])} \u2014 Daily App Store &amp; Google Play Top 30 Charts</title>
 <meta name="description" content="{html.escape(desc)}"/>
 <meta name="robots" content="index,follow"/>
 <link rel="canonical" href="{html.escape(base)}/"/>
 <link rel="alternate" hreflang="x-default" href="{html.escape(base)}/"/>
 <script type="application/ld+json">{{
   "@context":"https://schema.org","@type":"Dataset",
-  "name":"{html.escape(C.SITE['name'])} — Daily App Charts",
+  "name":"{html.escape(C.SITE['name'])} \u2014 Daily App Charts",
   "description":"{html.escape(desc)}",
   "creator":{{"@type":"Organization","name":"{html.escape(C.SITE['name'])}"}},
   "temporalCoverage":"{date}","isAccessibleForFree":true,
   "sameAs":"https://e-hai.github.io/Appstore_Top_30/api/"
 }}</script>
-<style>{css}</style>
+<style>{STYLE}</style>
 </head>
 <body>
-<h1>{html.escape(C.SITE['name'])}</h1>
-<p class="meta">Daily snapshots of the Top 30 apps in {len(C.ALL_MARKETS)} markets — {n} chart pages. Last updated {date}.</p>
-<p>Explore free, paid and grossing rankings plus game charts for the App Store and Google Play.
-Every page shows the current top 30, rank movement, a rank-history chart and a short insight
-computed from that day's real data. Rankings are a daily sample from the
-<a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a>
-open dataset, not a live feed.</p>
-{store_tables}
-<footer>
-Data source: <a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a>.
-App Store is a trademark of Apple Inc. Google Play is a trademark of Google LLC.
-All app names and marks belong to their respective owners.
-</footer>
+<header class="topbar"><div class="wrap">
+  <a class="brand" href="/"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
+  <nav class="crumb"><span class="meta-pill" style="border-color:#334155;background:#1e293b;color:#cbd5e1">\u00b7 Daily app chart directory</span></nav>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <span class="hero-eyebrow">Free \u00b7 Paid \u00b7 Grossing \u00b7 Games</span>
+    <h1>App charts, tracked daily.</h1>
+    <p class="hero-sub">Daily snapshots of the top apps in {len(C.ALL_MARKETS)} markets on the App Store
+      and Google Play. Every page shows the current board, rank movement, a rank-history chart
+      and a short insight computed from that day's real data.</p>
+    <div class="meta-row">
+      <span class="meta-pill"><span class="dot"></span>Updated daily</span>
+      <span class="meta-pill"><span class="dot"></span>Source: <b>e-hai/Appstore_Top_30</b></span>
+    </div>
+  </section>
+
+  <div class="stat-grid">{stat_grid}</div>
+
+  {store_panels_html}
+</main>
+
+<footer><div class="wrap">
+  <div class="footer-brand">AppRank<span class="brand-dot">.</span>Index</div>
+  <p>Data source: <a href="https://github.com/e-hai/Appstore_Top_30" rel="nofollow">e-hai/Appstore_Top_30</a>
+    \u2014 daily snapshots of Apple App Store / Google Play official charts, not a live feed.</p>
+  <p>App Store is a trademark of Apple Inc. Google Play is a trademark of Google LLC.
+    All app names and marks belong to their respective owners.</p>
+</div></footer>
 </body>
 </html>"""
     Path(out_root, "index.html").write_text(page, encoding="utf-8")
