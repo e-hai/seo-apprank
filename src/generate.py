@@ -207,6 +207,84 @@ def dataset_schema(rows: list[dict], date: str, market: str, chart: str, lang: s
         "sameAs": f"{C.API_BASE}/rankings/{C.STORES['app_store']['en']}_{market}_{chart}_{date}.json",
     }
 
+def breadcrumb_schema(url: str, name: str, lang: str) -> dict:
+    """首页 → 当前榜单页的两级面包屑，帮助搜索引擎理解层级。"""
+    return {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {"@type": "ListItem", "position": 1, "name": "AppRank Index", "item": home_url(lang)},
+            {"@type": "ListItem", "position": 2, "name": name, "item": url},
+        ],
+    }
+
+
+def itemlist_schema(rows: list[dict], name: str, url: str) -> dict:
+    """榜单前 10 名的有序 ItemList；应用详情页尚未上线，因此只给名称与位次。"""
+    els = [{"@type": "ListItem", "position": i, "name": r.get("name", "")}
+           for i, r in enumerate(rows[:10], 1)]
+    return {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": name,
+        "url": url,
+        "numberOfItems": len(els),
+        "itemListOrder": "https://schema.org/ItemListOrderAscending",
+        "itemListElement": els,
+    }
+
+
+def related_block(lang: str, store: str, market: str, chart: str,
+                  genre: str | None, lang_pages: dict[str, set[str]]) -> str:
+    """页内导航：同市场其他榜单、同榜单其他市场、另一商店的同名榜单。
+    只链接本语言真实存在的页面，避免死链。"""
+    T = L.get(lang)
+    existing = {u.rstrip("/") for u in lang_pages.get(lang, set())}
+
+    def link(label: str, url: str) -> str:
+        if url.rstrip("/") not in existing:
+            return ""
+        return f'<a class="chart-link" href="{html.escape(url)}">{html.escape(label)}</a>'
+
+    same_market = []
+    for ch2 in C.ALL_CHARTS:
+        if ch2 != chart:
+            same_market.append(link(C.CHARTS[ch2][lang], page_url(lang, store, market, ch2, None)))
+    if store in C.GENRE_BY_STORE:
+        g = C.GENRE_BY_STORE[store]
+        for ch2 in C.ALL_CHARTS:
+            same_market.append(link(f'{C.CHARTS[ch2][lang]} · {C.genre_label("游戏", lang)}',
+                                    page_url(lang, store, market, ch2, g)))
+
+    markets = C.ALL_MARKETS if lang == "en" else L.LANG_MARKETS.get(lang, C.ALL_MARKETS)
+    other_markets = [link(C.market_name(m, lang), page_url(lang, store, m, chart, genre))
+                     for m in markets if m != market]
+    other_markets = [a for a in other_markets if a][:12]  # 与首页矩阵互链，这里只放最近 12 个避免页面杂乱
+
+    other_store = ""
+    other = "play" if store == "app_store" else "app_store"
+    if other in C.ALL_STORES:
+        other_name = C.STORES[other].get(lang) or C.STORES[other]["en"]
+        other_store = link(f'{other_name} · {C.CHARTS[chart][lang]}',
+                           page_url(lang, other, market, chart, genre))
+
+    groups = [(T["rel_same_market"], same_market, ""),
+              (T["rel_other_markets"], other_markets, T["rel_home"]),
+              (T.get("rel_other_store"), [other_store], "")]
+    bits = []
+    for label, anchors, tail in groups:
+        anchors = [a for a in anchors if a]
+        if not anchors:
+            continue
+        tail_html = f'<a class="chart-link" href="{html.escape(home_url(lang))}">{html.escape(tail)}</a>' if tail else ""
+        bits.append(f'<div class="rel-group"><span class="rel-k">{html.escape(label)}</span>'
+                    f'<div class="rel-links">{"".join(anchors)}{tail_html}</div></div>')
+    if not bits:
+        return ""
+    return (f'<section class="panel related"><h2>{html.escape(T["rel_title"])}</h2>'
+            + "".join(bits) + "</section>")
+
+
 def software_schema(rows: list[dict]) -> list[dict]:
     out = []
     for r in rows[:3]:  # 仅为可见的前 3 名生成，避免 schema 与可见内容不一致
@@ -451,6 +529,9 @@ table.matrix td.mkt{font-weight:650;color:var(--ink);white-space:nowrap;position
 .chart-link{display:inline-block;font-size:.78rem;font-weight:600;color:var(--accent);
   background:var(--accent-soft);padding:3px 9px;border-radius:7px;white-space:nowrap}
 .chart-link:hover{background:var(--accent);color:#fff;text-decoration:none}
+.rel-group{margin-top:14px}
+.rel-k{display:block;font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted-2);margin-bottom:8px}
+.rel-links{display:flex;flex-wrap:wrap;gap:8px}
 .dash{color:#cbd5e1}
 
 /* Spark grid */
@@ -639,6 +720,8 @@ TPL = """<!doctype html>
     <div class="spark-grid">{spark}</div>
   </section>
 
+  {related}
+
   <div class="two-col">
     <section class="panel prose"><h2>{method_title}</h2><p>{methodology}</p></section>
     <section class="panel"><h2>{faq_title}</h2>{faq}</section>
@@ -724,8 +807,13 @@ def render_page(lang, store, market, chart, date, genre, rows, trend, insights,
     footer_note = html.escape(T["footer_note"].format(updated=updated))
 
     hl, hl_map = hreflang_tags(hreflang_mapping)
-    jsonld = json.dumps([dataset_schema(rows, date, market, chart, lang)] + software_schema(rows),
+    crumb_name = f"{ch} · {mkt}" + (f" · {gn}" if gn else "")
+    jsonld = json.dumps([dataset_schema(rows, date, market, chart, lang)]
+                        + software_schema(rows)
+                        + [breadcrumb_schema(url, crumb_name, lang),
+                           itemlist_schema(rows, f"{ch} · {mkt} · {date}", url)],
                         ensure_ascii=False)
+    related = related_block(lang, store, market, chart, genre, lang_pages)
 
     # 语言切换器：当前页在各语言是否有对应页
     nav = language_nav(lang, store, market, chart, genre, lang_pages)
@@ -771,7 +859,7 @@ def render_page(lang, store, market, chart, date, genre, rows, trend, insights,
         method_title=html.escape(T["method_title"]), methodology=html.escape(methodology),
         faq_title=html.escape(T["faq_title"]), faq=faq,
         attribution=attribution, footer_note=footer_note,
-        stats=stats, spark=spark,
+        stats=stats, spark=spark, related=related,
     )
     dest = Path(out_root) / rel_dir.lstrip("/") / "index.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
