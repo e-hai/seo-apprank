@@ -37,6 +37,7 @@ LOCALES = {
         "label": "English", "native": "English", "html_lang": "en",
         "brand_tag": "· Daily app chart directory",
         "nav_home": "Home", "lang_label": "Language",
+        "lang_partial_hint": "This language covers only its own market pages",
         "hero_eyebrow_chart": "Daily chart",
         "hero_sub_chart": ("A point-in-time snapshot of the top apps, with daily rank movement, "
                            "historical position and insights computed from the real data."),
@@ -108,6 +109,7 @@ LOCALES = {
         "label": "Korean", "native": "한국어", "html_lang": "ko",
         "brand_tag": "· 매일 앱 차트 디렉터리",
         "nav_home": "홈", "lang_label": "언어",
+        "lang_partial_hint": "이 언어는 자국 시장 페이지만 제공합니다",
         "hero_eyebrow_chart": "매일 차트",
         "hero_sub_chart": ("주요 앱의 현재 순위와 일별 변동, 과거 순위, 그리고 실제 데이터로 "
                            "계산한 인사이트를 한눈에 보여드립니다."),
@@ -177,6 +179,7 @@ LOCALES = {
         "label": "Japanese", "native": "日本語", "html_lang": "ja",
         "brand_tag": "· 毎日アプリランキングディレクトリ",
         "nav_home": "ホーム", "lang_label": "言語",
+        "lang_partial_hint": "この言語は自国市場のページのみ提供しています",
         "hero_eyebrow_chart": "毎日ランキング",
         "hero_sub_chart": ("主要アプリの現在の順位と日次の変動、過去の順位、そして実際のデータから"
                            "計算したインサイトを一目で示します。"),
@@ -247,6 +250,7 @@ LOCALES = {
         "label": "Chinese", "native": "中文", "html_lang": "zh-CN",
         "brand_tag": "· 每日应用榜单目录",
         "nav_home": "首页", "lang_label": "语言",
+        "lang_partial_hint": "该语言仅提供本地市场页面",
         "hero_eyebrow_chart": "每日榜单",
         "hero_sub_chart": ("一目了然地查看主要应用的当前排名、日环比变动、历史位置，以及根据真实"
                            "数据计算的洞察。"),
@@ -313,6 +317,7 @@ LOCALES = {
         "label": "Turkish", "native": "Türkçe", "html_lang": "tr",
         "brand_tag": "· Günlük uygulama sıralama dizini",
         "nav_home": "Ana sayfa", "lang_label": "Dil",
+        "lang_partial_hint": "Bu dil yalnızca kendi pazarının sayfalarını kapsar",
         "hero_eyebrow_chart": "Günlük sıralama",
         "hero_sub_chart": ("Önde gelen uygulamaların güncel sırası, günlük değişim, geçmiş konum "
                            "ve gerçek verilerden hesaplanan içgörüler tek bakışta."),

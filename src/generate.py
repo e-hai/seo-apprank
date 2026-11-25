@@ -259,11 +259,17 @@ def language_nav(current: str, store: str, market: str, chart: str,
         equivalent = page_url(code, store, market, chart, genre)
         if equivalent in lang_pages.get(code, set()):
             href = equivalent
+            partial = ""
         else:
             href = home_url(code)  # 该语言没有此市场页面，避免死链
+            # 明确告诉用户：这个语言版本只覆盖本地市场，不是当前页的翻译
+            partial = (f' class="alt-partial" title="{html.escape(meta["lang_partial_hint"])}"'
+                       ' style="opacity:.62" data-partial="1"')
         cur = ' class="current" aria-current="page"' if code == current else ""
         label = meta["native"] if code != "en" else "English"
-        links.append(f'<a href="{html.escape(href)}"{cur} lang="{meta["html_lang"]}">{html.escape(label)}</a>')
+        marker = '<span aria-hidden="true" style="font-size:.66em;vertical-align:super">*</span>' if partial else ""
+        cls = cur if not partial else partial
+        links.append(f'<a href="{html.escape(href)}"{cls} lang="{meta["html_lang"]}">{html.escape(label)}{marker}</a>')
     return "\n".join(links)
 
 
@@ -911,6 +917,40 @@ def write_robots(out_root: str):
         "User-agent: *\nAllow: /\nSitemap: " + C.SITE["base_url"] + "/sitemap.xml\n",
         encoding="utf-8")
 
+
+def write_not_found(out_root: str):
+    """404 页面：未知路径返回真 404，避免整站软 404。"""
+    base = C.SITE["base_url"]
+    t = L.get("en")
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Page not found — AppRank Index</title>
+<meta name="description" content="This page does not exist."/>
+<meta name="robots" content="noindex,follow"/>
+<style>{STYLE}</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="brand" href="{base}/"><span class="brand-ico">A</span><span>AppRank<span class="brand-dot">.</span>Index</span></a>
+  <nav class="langnav" aria-label="Language"><a href="{base}/" aria-current="page">English</a><a href="{base}/ko/">한국어</a><a href="{base}/ja/">日本語</a><a href="{base}/zh/">中文</a><a href="{base}/tr/">Türkçe</a></nav>
+</div></header>
+<main class="wrap">
+  <section class="hero">
+    <span class="hero-eyebrow">404</span>
+    <h1>That page is not in the directory</h1>
+    <p class="hero-sub">The URL you opened does not match any chart. It may have moved, or the market and chart combination was never published.</p>
+    <p><a href="{base}/">Browse all 39 markets</a> · <a href="{base}/app_store/us/top/free/">United States · Top Free</a></p>
+  </section>
+</main>
+<footer><div class="wrap">{html.escape(t["footer_note"].split("{")[0].strip())} · {html.escape(C.SITE.get("author", "AppRank Index"))}</div></footer>
+</body>
+</html>
+"""
+    Path(out_root, "404.html").write_text(page, encoding="utf-8")
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1096,6 +1136,7 @@ def main():
     all_urls = home_pages + [u for lang in ["en"] + L.NON_EN_LANGS for u in urls_by_lang[lang]]
     write_sitemap(all_urls, out)
     write_robots(out)
+    write_not_found(out)
     INC.save_state(args.state, date, new_state_pages)
 
     errs = validate_hreflang(groups)
