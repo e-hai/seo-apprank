@@ -999,6 +999,14 @@ def write_sitemap(urls: list[tuple[str, str]], out_root: str):
         lines.append(f"  <url><loc>{html.escape(url)}</loc><lastmod>{updated}</lastmod></url>")
     lines.append("</urlset>")
     Path(out_root, "sitemap.xml").write_text("\n".join(lines), encoding="utf-8")
+    # sitemap-index 实验（2026-11-26）：GSC 对 /sitemap.xml 持续报"无法抓取"，
+    # 额外暴露一个只指向本站 sitemap.xml 的 sitemapindex，用于对比抓取结果。
+    newest = max((u for _, u in urls), default="")
+    index = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+             f"  <sitemap><loc>{html.escape(C.SITE['base_url'])}/sitemap.xml</loc><lastmod>{newest}</lastmod></sitemap>",
+             '</sitemapindex>']
+    Path(out_root, "sitemap-index.xml").write_text("\n".join(index), encoding="utf-8")
 
 def write_robots(out_root: str):
     Path(out_root, "robots.txt").write_text(
